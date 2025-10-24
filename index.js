@@ -1,5 +1,5 @@
-// server.js - Backend API pour Action Plan DB (corrigé)
-require('dotenv').config({ path: __dirname + '/.env' }); // 1) Charger .env en tout premier
+// server.js - Backend API pour Action Plan DB
+require('dotenv').config({ path: __dirname + '/.env' });
 
 const express = require('express');
 const cors = require('cors');
@@ -8,19 +8,17 @@ const { Pool } = require('pg');
 const app = express();
 const PORT = Number(process.env.PORT || 5000);
 
-// 2) Aucune valeur en dur / fallback : on lit UNIQUEMENT process.env
-// 3) SSL obligatoire sur Azure PostgreSQL
+// Configuration de la base de données PostgreSQL
 const pool = new Pool({
-  user: process.env.DB_USER,            // ex: administrationSTS@avo-adb-002
-  host: process.env.DB_HOST,            // ex: avo-adb-002.postgres.database.azure.com
-  database: process.env.DB_NAME,        // ex: Action Plan
-  password: process.env.DB_PASSWORD,    // ex: St$@0987
+  user: process.env.DB_USER,
+  host: process.env.DB_HOST,
+  database: process.env.DB_NAME,
+  password: process.env.DB_PASSWORD,
   port: Number(process.env.DB_PORT || 5432),
   ssl: { require: true, rejectUnauthorized: false }
 });
 
-// Petit log de contrôle au démarrage (à retirer ensuite)
-console.log('🔧 DB config (sanity check):', {
+console.log('🔧 DB config:', {
   DB_USER: process.env.DB_USER,
   DB_HOST: process.env.DB_HOST,
   DB_NAME: process.env.DB_NAME,
@@ -55,7 +53,7 @@ app.get('/api/sujets', async (req, res) => {
       SELECT 
         s.*,
         COUNT(DISTINCT a.id) as total_actions,
-        COUNT(DISTINCT CASE WHEN a.status = 'completed' THEN a.id END) as completed_actions,
+        COUNT(DISTINCT CASE WHEN a.status = 'completed' OR a.status = 'closed' THEN a.id END) as completed_actions,
         COUNT(DISTINCT CASE WHEN a.status = 'overdue' THEN a.id END) as overdue_actions
       FROM sujet s
       LEFT JOIN action a ON s.id = a.sujet_id
@@ -95,7 +93,7 @@ app.get('/api/sujets/:id/sous-sujets', async (req, res) => {
       SELECT 
         s.*,
         COUNT(DISTINCT a.id) as total_actions,
-        COUNT(DISTINCT CASE WHEN a.status = 'completed' THEN a.id END) as completed_actions
+        COUNT(DISTINCT CASE WHEN a.status = 'completed' OR a.status = 'closed' THEN a.id END) as completed_actions
       FROM sujet s
       LEFT JOIN action a ON s.id = a.sujet_id
       WHERE s.parent_sujet_id = $1
@@ -117,7 +115,9 @@ app.get('/api/sujets-racines', async (req, res) => {
       SELECT 
         s.*,
         COUNT(DISTINCT a.id) as total_actions,
-        COUNT(DISTINCT ss.id) as total_sous_sujets
+        COUNT(DISTINCT ss.id) as total_sous_sujets,
+        COUNT(DISTINCT CASE WHEN a.status = 'completed' OR a.status = 'closed' THEN a.id END) as completed_actions,
+        COUNT(DISTINCT CASE WHEN a.status = 'overdue' THEN a.id END) as overdue_actions
       FROM sujet s
       LEFT JOIN action a ON s.id = a.sujet_id
       LEFT JOIN sujet ss ON s.id = ss.parent_sujet_id
@@ -191,10 +191,10 @@ app.get('/api/statistiques', async (req, res) => {
       SELECT 
         COUNT(DISTINCT s.id) as total_sujets,
         COUNT(DISTINCT a.id) as total_actions,
-        COUNT(DISTINCT CASE WHEN a.status = 'completed' THEN a.id END) as actions_completed,
+        COUNT(DISTINCT CASE WHEN a.status = 'closed' THEN a.id END) as actions_completed,
         COUNT(DISTINCT CASE WHEN a.status = 'overdue' THEN a.id END) as actions_overdue,
-        COUNT(DISTINCT CASE WHEN a.status = 'in_progress' THEN a.id END) as actions_in_progress,
-        COUNT(DISTINCT CASE WHEN a.status = 'nouveau' THEN a.id END) as actions_nouveau
+        COUNT(DISTINCT CASE WHEN a.status IN ('open', 'in_progress') THEN a.id END) as actions_in_progress,
+        COUNT(DISTINCT CASE WHEN a.status = 'blocked' THEN a.id END) as actions_blocked
       FROM sujet s
       LEFT JOIN action a ON s.id = a.sujet_id
     `);
@@ -205,10 +205,121 @@ app.get('/api/statistiques', async (req, res) => {
   }
 });
 
+// 9. NOUVEAU: Mettre à jour le statut d'une action
+app.put('/api/actions/:id/status', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    // Validation du statut
+    const validStatuses = ['open', 'closed', 'blocked', 'overdue'];
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({ 
+        error: 'Statut invalide. Valeurs acceptées: open, closed, blocked, overdue' 
+      });
+    }
+
+    // Préparer la requête de mise à jour
+    let query;
+    let values;
+
+    if (status === 'closed') {
+      // Si le statut devient "closed", mettre à jour closed_date avec NOW()
+      query = `
+        UPDATE action 
+        SET status = $1, closed_date = NOW()
+        WHERE id = $2
+        RETURNING *
+      `;
+      values = [status, id];
+    } else {
+      // Pour les autres statuts, mettre à jour uniquement le statut
+      query = `
+        UPDATE action 
+        SET status = $1
+        WHERE id = $2
+        RETURNING *
+      `;
+      values = [status, id];
+    }
+
+    const result = await pool.query(query, values);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Action non trouvée' });
+    }
+
+    console.log(`✅ Action ${id} mise à jour: statut = ${status}`);
+    res.json({ 
+      success: true, 
+      action: result.rows[0],
+      message: `Statut mis à jour vers "${status}"${status === 'closed' ? ' et date de fermeture enregistrée' : ''}`
+    });
+
+  } catch (err) {
+    console.error('Erreur lors de la mise à jour du statut:', err);
+    res.status(500).json({ error: 'Erreur serveur lors de la mise à jour' });
+  }
+});
+
+// 10. NOUVEAU: Recherche globale
+app.get('/api/recherche', async (req, res) => {
+  try {
+    const { q } = req.query;
+    
+    if (!q || q.trim().length === 0) {
+      return res.status(400).json({ error: 'Paramètre de recherche requis' });
+    }
+
+    const searchTerm = `%${q.toLowerCase()}%`;
+
+    const query = `
+      SELECT 
+        'sujet' as type,
+        s.id,
+        s.titre,
+        s.description,
+        s.parent_sujet_id,
+        NULL as responsable,
+        NULL as due_date,
+        NULL as status
+      FROM sujet s
+      WHERE LOWER(s.titre) LIKE $1 OR LOWER(s.description) LIKE $1
+      
+      UNION ALL
+      
+      SELECT 
+        'action' as type,
+        a.id,
+        a.titre,
+        a.description,
+        a.sujet_id as parent_sujet_id,
+        a.responsable,
+        a.due_date,
+        a.status
+      FROM action a
+      WHERE LOWER(a.titre) LIKE $1 
+         OR LOWER(a.description) LIKE $1 
+         OR LOWER(a.responsable) LIKE $1
+      
+      ORDER BY titre
+      LIMIT 50
+    `;
+
+    const result = await pool.query(query, [searchTerm]);
+    res.json(result.rows);
+
+  } catch (err) {
+    console.error('Erreur lors de la recherche:', err);
+    res.status(500).json({ error: 'Erreur serveur lors de la recherche' });
+  }
+});
+
 // Démarrage du serveur
 app.listen(PORT, () => {
   console.log(`🚀 Serveur API démarré sur le port ${PORT}`);
   console.log(`📊 Documentation: http://localhost:${PORT}/api/health`);
+  console.log(`🎨 Interface: Accédez à votre application React`);
 });
 
 // Gestion de la fermeture propre
@@ -217,3 +328,5 @@ process.on('SIGINT', async () => {
   await pool.end();
   process.exit(0);
 });
+
+module.exports = app;
