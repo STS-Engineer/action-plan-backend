@@ -1,16 +1,6 @@
 fastapi[standard]
-pydantic-settings
-pydantic[email]
 sqlalchemy
 psycopg2-binary
 uvicorn
 alembic
 python-dotenv
-requests
-tenacity
-pandas 
-openpyxl
-python-multipart
-xlsxwriter
-jinja2
-PyJWT
