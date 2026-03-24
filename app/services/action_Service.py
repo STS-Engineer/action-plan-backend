@@ -64,3 +64,13 @@ async def get_statistiques_service(db: Session):
         "actions_in_progress": stats.actions_in_progress,
         "actions_blocked": stats.actions_blocked,
     }
+    
+async def get_emails_service(db: Session):
+    emails = (
+        db.query(Action.email_responsable)
+        .filter(Action.email_responsable != None)
+        .distinct()
+        .all()
+    )
+    
+    return [email[0] for email in emails if '' != email[0]]

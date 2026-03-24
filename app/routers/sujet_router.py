@@ -30,9 +30,10 @@ async def getSujetById(
 
 @router.get("/sujets-racine")
 async def getSujetsRacine(
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    email: str | None = None
 ):
-    return await getSujetsRacineService(db)
+    return await getSujetsRacineService(db, email)
 
 @router.get("/sujets/{sujet_id}/sous-sujets")
 async def getSousSujetsBySujetId(

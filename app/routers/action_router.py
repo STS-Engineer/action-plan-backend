@@ -7,7 +7,8 @@ from app.services.action_Service import (
     get_actions_by_sujet_id_service,
     get_action_by_id_service,
     get_sous_actions_by_action_id_service,
-    get_statistiques_service
+    get_statistiques_service,
+    get_emails_service
 )
 
 
@@ -40,3 +41,9 @@ async def get_statistiques(
     db: Session = Depends(get_db)
 ):
     return await get_statistiques_service(db)
+
+@router.get("/emails")
+async def getEmails(
+    db: Session = Depends(get_db)
+):
+    return await get_emails_service(db)

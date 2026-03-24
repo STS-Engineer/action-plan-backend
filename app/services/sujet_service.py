@@ -2,6 +2,7 @@ from app.models.sujet import Sujet
 from app.models.action import Action
 from sqlalchemy import case, func
 from sqlalchemy.orm import aliased, Session
+from sqlalchemy import or_, select
 
 
 async def getSujetsService(db: Session):
@@ -32,10 +33,10 @@ async def getSujetsService(db: Session):
         for sujet, total_actions, completed_actions, overdue_actions in sujets
     ]
     
-async def getSujetsRacineService(db: Session):
+async def getSujetsRacineService(db: Session, email: str | None = None):
     SousSujet = aliased(Sujet)
 
-    sujets_racine = (
+    query = (
         db.query(
             Sujet,
             func.count(func.distinct(Action.id)).label("total_actions"),
@@ -44,6 +45,33 @@ async def getSujetsRacineService(db: Session):
         .outerjoin(Action, Sujet.id == Action.sujet_id)
         .outerjoin(SousSujet, Sujet.id == SousSujet.parent_sujet_id)
         .filter(Sujet.parent_sujet_id.is_(None))
+    )
+
+    if email:
+        # Subquery: find root sujet IDs that have the email
+        # either on a direct action OR on an action under a child sujet
+        ChildSujet = aliased(Sujet)
+        ChildAction = aliased(Action)
+
+        email_subquery = (
+            db.query(Sujet.id)
+            .outerjoin(Action, Sujet.id == Action.sujet_id)
+            .outerjoin(ChildSujet, Sujet.id == ChildSujet.parent_sujet_id)
+            .outerjoin(ChildAction, ChildSujet.id == ChildAction.sujet_id)
+            .filter(Sujet.parent_sujet_id.is_(None))
+            .filter(
+                or_(
+                    Action.email_responsable == email,
+                    ChildAction.email_responsable == email,
+                )
+            )
+            .subquery()
+        )
+
+        query = query.filter(Sujet.id.in_(select(email_subquery)))
+
+    sujets_racine = (
+        query
         .group_by(Sujet.id)
         .order_by(Sujet.created_at.desc())
         .all()
