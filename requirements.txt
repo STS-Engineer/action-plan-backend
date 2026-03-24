@@ -2,5 +2,7 @@ fastapi[standard]
 sqlalchemy
 psycopg2-binary
 uvicorn
+uvicorn-worker
+gunicorn
 alembic
 python-dotenv
