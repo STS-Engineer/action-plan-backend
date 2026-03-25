@@ -33,38 +33,6 @@ jobs:
           source antenv/bin/activate
           pip install -r requirements.txt
 
-      - name: Login to Azure
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_D4D65AD5CA48485C880ACB8F32E51E36 }}
-          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_9ACD5F1155D04F3D9B19944C46F4036C }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      
-      - name: Set Azure App Service environment variables
-        run: |
-          az webapp config appsettings set \
-            --name ap-back \
-            --resource-group STS_Developments \
-            --settings \
-              ENVIRONMENT=production \
-              FRONTEND_URL='${{ secrets.FRONTEND_URL }}' \
-              DB_USER='${{ secrets.DB_USER }}' \
-              DB_PASSWORD='${{ secrets.DB_PASSWORD }}' \
-              DB_HOST='${{ secrets.DB_HOST }}' \
-              DB_NAME='${{ secrets.DB_NAME }}' \
-              DB_PORT='${{ secrets.DB_PORT }}' \
-              SMTP_HOST='${{ secrets.SMTP_HOST }}' \
-              SMTP_PASSWORD='${{ secrets.SMTP_PASSWORD }}' \
-              SMTP_PORT='${{ secrets.SMTP_PORT }}' \
-              SMTP_USER='${{ secrets.SMTP_USER }}'
-
-      - name: Set startup command
-        run: |
-          az webapp config set \
-            --name ap-back \
-            --resource-group STS_Developments \
-            --startup-file "gunicorn -k uvicorn.workers.UvicornWorker app.main:app --timeout 0 --workers 1 --bind=0.0.0.0:8000"
-
       - name: Wait for SCM restart
         run: sleep 60
 
