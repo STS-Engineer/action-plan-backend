@@ -38,7 +38,7 @@ jobs:
         with:
           client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_D4D65AD5CA48485C880ACB8F32E51E36 }}
           tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_9ACD5F1155D04F3D9B19944C46F4036C }}
-          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_77F66DA335C24743A59D35939DC89E0E }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       
       - name: Set Azure App Service environment variables
         run: |
