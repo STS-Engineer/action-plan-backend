@@ -14,6 +14,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
+      id-token: write # Required for azure/login
       contents: read #This is required for actions/checkout
 
     steps:
@@ -31,32 +32,36 @@ jobs:
           python -m venv antenv
           source antenv/bin/activate
           pip install -r requirements.txt
-                
-      # By default, when you enable GitHub CI/CD integration through the Azure portal, the platform automatically sets the SCM_DO_BUILD_DURING_DEPLOYMENT application setting to true. This triggers the use of Oryx, a build engine that handles application compilation and dependency installation (e.g., pip install) directly on the platform during deployment. Hence, we exclude the antenv virtual environment directory from the deployment artifact to reduce the payload size. 
-      - name: Upload artifact for deployment jobs
-        uses: actions/upload-artifact@v4
-        with:
-          name: python-app
-          path: |
-            .
-            !antenv/
-
-      # 🚫 Opting Out of Oryx Build
-      # If you prefer to disable the Oryx build process during deployment, follow these steps:
-      # 1. Remove the SCM_DO_BUILD_DURING_DEPLOYMENT app setting from your Azure App Service Environment variables.
-      # 2. Refer to sample workflows for alternative deployment strategies: https://github.com/Azure/actions-workflow-samples/tree/master/AppService
       
+      - name: Set Azure App Service environment variables
+        run: |
+          az webapp config appsettings set \
+            --name ap-back \
+            --resource-group STS_Developments \
+            --settings \
+              ENVIRONMENT=production \
+              FRONTEND_URL='${{ secrets.FRONTEND_URL }}' \
+              DB_USER='${{ secrets.DB_USER }}' \
+              DB_PASSWORD='${{ secrets.DB_PASSWORD }}' \
+              DB_HOST='${{ secrets.DB_HOST }}' \
+              DB_NAME='${{ secrets.DB_NAME }}' \
+              DB_PORT='${{ secrets.DB_PORT }}' \
+              SMTP_HOST='${{ secrets.SMTP_HOST }}' \
+              SMTP_PASSWORD='${{ secrets.SMTP_PASSWORD }}' \
+              SMTP_PORT='${{ secrets.SMTP_PORT }}' \
+              SMTP_USER='${{ secrets.SMTP_USER }}' \
+              TENANT_ID='${{ secrets.TENANT_ID }}'
 
-  deploy:
-    runs-on: ubuntu-latest
-    needs: build
-    
-    steps:
-      - name: Download artifact from build job
-        uses: actions/download-artifact@v4
-        with:
-          name: python-app
-      
+      - name: Set startup command
+        run: |
+          az webapp config set \
+            --name ap-back \
+            --resource-group STS_Developments \
+            --startup-file "gunicorn -k uvicorn.workers.UvicornWorker app.main:app --timeout 0 --workers 1 --bind=0.0.0.0:8000"
+
+      - name: Wait for SCM restart
+        run: sleep 60
+
       - name: 'Deploy to Azure Web App'
         uses: azure/webapps-deploy@v3
         id: deploy-to-webapp
