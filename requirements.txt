@@ -1,8 +1,8 @@
 fastapi[standard]
+pydantic-settings
+pydantic[email]
 sqlalchemy
 psycopg2-binary
 uvicorn
-uvicorn-worker
-gunicorn
 alembic
 python-dotenv

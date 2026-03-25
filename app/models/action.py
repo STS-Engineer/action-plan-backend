@@ -7,7 +7,7 @@ class Action(Base):
     __tablename__ = "action"
 
     id = Column(BigInteger, primary_key=True, index=True)
-    sujet_id = Column(Integer, ForeignKey("sujet.id", ondelete="CASCADE"), nullable=False)
+    sujet_id = Column(BigInteger, ForeignKey("sujet.id", ondelete="CASCADE"), nullable=False)
     parent_action_id = Column(BigInteger, ForeignKey("action.id", ondelete="CASCADE"), nullable=True)
     type = Column(Text, nullable=False)
     titre = Column(Text, nullable=False)

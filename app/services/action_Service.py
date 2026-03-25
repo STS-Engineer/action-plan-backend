@@ -11,7 +11,22 @@ async def get_actions_by_sujet_id_service(sujet_id: int, db: Session):
         .order_by(Action.ordre.asc(), Action.created_at.desc())
         .all()
     )
-    return actions
+
+    # Walk up to the root sujet (parent_sujet_id is null)
+    sujet = db.query(Sujet).filter(Sujet.id == sujet_id).first()
+    root_sujet = sujet
+
+    while root_sujet and root_sujet.parent_sujet_id is not None:
+        root_sujet = db.query(Sujet).filter(Sujet.id == root_sujet.parent_sujet_id).first()
+
+    return [
+        {
+            **action.__dict__,
+            "corrective_action_app": root_sujet.code.startswith("8D") if root_sujet else False,
+            "rm_stock_app": "AP-RAW-MATERIAL" in root_sujet.code if root_sujet else False,
+        }
+        for action in actions
+    ]
 
 async def get_action_by_id_service(action_id: int, db: Session):
     action = db.query(Action).filter(Action.id == action_id).first()

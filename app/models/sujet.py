@@ -11,7 +11,7 @@ class Sujet(Base):
     code = Column(Text, nullable=False)
     titre= Column(Text, nullable=False)
     description = Column(Text, nullable=True)
-    parent_sujet_id = Column(Integer, ForeignKey("sujet.id"), nullable=True)
+    parent_sujet_id = Column(BigInteger, ForeignKey("sujet.id"), nullable=True)
     created_at = Column(
         DateTime(timezone=True),
         nullable=False,

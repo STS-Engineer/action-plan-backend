@@ -32,7 +32,7 @@ async def getSujetsService(db: Session):
         } 
         for sujet, total_actions, completed_actions, overdue_actions in sujets
     ]
-    
+
 async def getSujetsRacineService(db: Session, email: str | None = None):
     SousSujet = aliased(Sujet)
 
@@ -48,8 +48,6 @@ async def getSujetsRacineService(db: Session, email: str | None = None):
     )
 
     if email:
-        # Subquery: find root sujet IDs that have the email
-        # either on a direct action OR on an action under a child sujet
         ChildSujet = aliased(Sujet)
         ChildAction = aliased(Action)
 
@@ -68,7 +66,7 @@ async def getSujetsRacineService(db: Session, email: str | None = None):
             .subquery()
         )
 
-        query = query.filter(Sujet.id.in_(select(email_subquery)))
+        query = query.filter(Sujet.id.in_(email_subquery))
 
     sujets_racine = (
         query
