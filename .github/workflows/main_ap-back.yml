@@ -1,5 +1,6 @@
 # Docs for the Azure Web Apps Deploy action: https://github.com/Azure/webapps-deploy
 # More GitHub Actions for Azure: https://github.com/Azure/actions
+# More info on Python, GitHub Actions, and Azure App Service: https://aka.ms/python-webapps-actions
 
 name: Build and deploy Python app to Azure Web App - ap-back
 
@@ -13,7 +14,6 @@ jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      id-token: write 
       contents: read #This is required for actions/checkout
 
     steps:
@@ -22,46 +22,45 @@ jobs:
       - name: Set up Python version
         uses: actions/setup-python@v5
         with:
-          python-version: '3.13'
+          python-version: '3.12'
 
+      # 🛠️ Local Build Section (Optional)
+      # The following section in your workflow is designed to catch build issues early on the client side, before deployment. This can be helpful for debugging and validation. However, if this step significantly increases deployment time and early detection is not critical for your workflow, you may remove this section to streamline the deployment process.
       - name: Create and Start virtual environment and Install dependencies
         run: |
           python -m venv antenv
           source antenv/bin/activate
           pip install -r requirements.txt
-      
-      - name: Login to Azure
-        uses: azure/login@v2
+                
+      # By default, when you enable GitHub CI/CD integration through the Azure portal, the platform automatically sets the SCM_DO_BUILD_DURING_DEPLOYMENT application setting to true. This triggers the use of Oryx, a build engine that handles application compilation and dependency installation (e.g., pip install) directly on the platform during deployment. Hence, we exclude the antenv virtual environment directory from the deployment artifact to reduce the payload size. 
+      - name: Upload artifact for deployment jobs
+        uses: actions/upload-artifact@v4
         with:
-          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_D4D65AD5CA48485C880ACB8F32E51E36 }}
-          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_9ACD5F1155D04F3D9B19944C46F4036C }}
-          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_77F66DA335C24743A59D35939DC89E0E }}
+          name: python-app
+          path: |
+            .
+            !antenv/
 
-      - name: Set Azure App Service environment variables
-        run: |
-          az webapp config appsettings set \
-            --name ap-back \
-            --resource-group STS_Developments \
-            --settings \
-              ENVIRONMENT=production \
-              FRONTEND_URL='${{ secrets.FRONTEND_URL }}' \
-              DB_USER='${{ secrets.DB_USER }}' \
-              DB_PASSWORD='${{ secrets.DB_PASSWORD }}' \
-              DB_HOST='${{ secrets.DB_HOST }}' \
-              DB_PORT='${{ secrets.DB_PORT }}' \
-              DB_NAME='${{ secrets.DB_NAME }}' \
-              SMTP_USER='${{ secrets.SMTP_USER }}' \
-              SMTP_PASSWORD='${{ secrets.SMTP_PASSWORD }}' \
-              SMTP_HOST='${{ secrets.SMTP_HOST }}' \
-              SMTP_PORT='${{ secrets.SMTP_PORT }}' \
+      # 🚫 Opting Out of Oryx Build
+      # If you prefer to disable the Oryx build process during deployment, follow these steps:
+      # 1. Remove the SCM_DO_BUILD_DURING_DEPLOYMENT app setting from your Azure App Service Environment variables.
+      # 2. Refer to sample workflows for alternative deployment strategies: https://github.com/Azure/actions-workflow-samples/tree/master/AppService
+      
 
-      - name: Wait for SCM restart
-        run: sleep 60
-
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+    
+    steps:
+      - name: Download artifact from build job
+        uses: actions/download-artifact@v4
+        with:
+          name: python-app
+      
       - name: 'Deploy to Azure Web App'
-        id: deploy-to-webapp
         uses: azure/webapps-deploy@v3
+        id: deploy-to-webapp
         with:
           app-name: 'ap-back'
           slot-name: 'Production'
-          
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_267E9643BB92493FA99A16D2E0457C19 }}
