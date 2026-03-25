@@ -56,7 +56,7 @@ jobs:
               SMTP_HOST='${{ secrets.SMTP_HOST }}' \
               SMTP_PASSWORD='${{ secrets.SMTP_PASSWORD }}' \
               SMTP_PORT='${{ secrets.SMTP_PORT }}' \
-              SMTP_USER='${{ secrets.SMTP_USER }}' \
+              SMTP_USER='${{ secrets.SMTP_USER }}'
 
       - name: Set startup command
         run: |
