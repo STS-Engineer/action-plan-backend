@@ -89,3 +89,13 @@ async def get_emails_service(db: Session):
     )
     
     return [email[0] for email in emails if '' != email[0]]
+
+async def update_action_status_service(action_id: int, status: str, db: Session):
+    action = db.query(Action).filter(Action.id == action_id).first()
+    if not action:
+        return {"error": "Action not found"}
+
+    action.status = status
+    db.commit()
+    db.refresh(action)
+    return action

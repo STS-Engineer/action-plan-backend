@@ -3,12 +3,14 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from app.config.database import get_db
+from app.schema.actionSchema import updateActionStatusSchema
 from app.services.action_Service import (
     get_actions_by_sujet_id_service,
     get_action_by_id_service,
     get_sous_actions_by_action_id_service,
     get_statistiques_service,
-    get_emails_service
+    get_emails_service,
+    update_action_status_service
 )
 
 
@@ -47,3 +49,11 @@ async def getEmails(
     db: Session = Depends(get_db)
 ):
     return await get_emails_service(db)
+
+@router.put("/actions/{action_id}/status")
+async def updateActionStatus(
+    action_id: int,
+    payload: updateActionStatusSchema,
+    db: Session = Depends(get_db)
+):
+    return await update_action_status_service(action_id, payload.status, db)
