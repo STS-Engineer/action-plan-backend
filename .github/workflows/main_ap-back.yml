@@ -32,6 +32,13 @@ jobs:
           python -m venv antenv
           source antenv/bin/activate
           pip install -r requirements.txt
+
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_0EE136FA8D824B85B88108A7A80E7907 }}
+          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_D16E631F61944F06893AAD2FC773A5BC }}
+          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_DB210915B36E4D2D8C744BFBA039CA94 }}
       
       - name: Set Azure App Service environment variables
         run: |
@@ -50,7 +57,6 @@ jobs:
               SMTP_PASSWORD='${{ secrets.SMTP_PASSWORD }}' \
               SMTP_PORT='${{ secrets.SMTP_PORT }}' \
               SMTP_USER='${{ secrets.SMTP_USER }}' \
-              TENANT_ID='${{ secrets.TENANT_ID }}'
 
       - name: Set startup command
         run: |
