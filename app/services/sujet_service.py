@@ -92,3 +92,59 @@ async def get_sous_sujets_by_sujet_id_service(sujet_id: int, db: Session):
         .all()
     )
     return sous_sujets
+async def get_team_sujets_racine_service(email: str, db: Session, directory_db):
+    from app.services.directory_service import get_all_underlings
+
+    underlings = get_all_underlings(directory_db, email)
+
+    underling_emails = [
+        member.email.lower()
+        for member in underlings
+        if member.email
+    ]
+
+    if not underling_emails:
+        return []
+
+    SousSujet = aliased(Sujet)
+    ChildSujet = aliased(Sujet)
+    ChildAction = aliased(Action)
+
+    email_subquery = (
+        db.query(Sujet.id)
+        .outerjoin(Action, Sujet.id == Action.sujet_id)
+        .outerjoin(ChildSujet, Sujet.id == ChildSujet.parent_sujet_id)
+        .outerjoin(ChildAction, ChildSujet.id == ChildAction.sujet_id)
+        .filter(Sujet.parent_sujet_id.is_(None))
+        .filter(
+            or_(
+                Action.email_responsable.in_(underling_emails),
+                ChildAction.email_responsable.in_(underling_emails),
+            )
+        )
+        .subquery()
+    )
+
+    sujets_racine = (
+        db.query(
+            Sujet,
+            func.count(func.distinct(Action.id)).label("total_actions"),
+            func.count(func.distinct(SousSujet.id)).label("total_sous_sujets"),
+        )
+        .outerjoin(Action, Sujet.id == Action.sujet_id)
+        .outerjoin(SousSujet, Sujet.id == SousSujet.parent_sujet_id)
+        .filter(Sujet.parent_sujet_id.is_(None))
+        .filter(Sujet.id.in_(email_subquery))
+        .group_by(Sujet.id)
+        .order_by(Sujet.created_at.desc())
+        .all()
+    )
+
+    return [
+        {
+            **sujet.__dict__,
+            "total_actions": total,
+            "total_sous_sujets": sous,
+        }
+        for sujet, total, sous in sujets_racine
+    ]

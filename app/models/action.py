@@ -17,6 +17,12 @@ class Action(Base):
     responsable = Column(Text, nullable=True)
     email_responsable = Column(Text, nullable=True)
     due_date = Column(Date(), nullable=True)
+    estimated_duration_days = Column(Integer, nullable=True)
+    importance = Column(Text, nullable=True)
+    urgency = Column(Text, nullable=True)
+    escalation_level = Column(Integer, nullable=True)
+    priority_index = Column(Integer, nullable=True)
+    last_reminder_sent_at = Column(DateTime(timezone=True), nullable=True)
     ordre = Column(Integer, nullable=True)
     depth = Column(Integer, nullable=True)
     created_at = Column(

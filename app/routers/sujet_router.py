@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from app.config.database import get_db
-from app.services.sujet_service import getSujetsService, getSujetsRacineService, get_sous_sujets_by_sujet_id_service
-
+from app.services.sujet_service import getSujetsService, getSujetsRacineService, get_sous_sujets_by_sujet_id_service, get_team_sujets_racine_service
+from app.config.directory_database import get_directory_db
 
 router = APIRouter(prefix="/api/action_plan_sujet", tags=["Sujet Action Plan"])
 
@@ -41,3 +41,10 @@ async def getSousSujetsBySujetId(
     db: Session = Depends(get_db)
 ):
     return await get_sous_sujets_by_sujet_id_service(sujet_id, db)
+@router.get("/team-sujets-racine")
+async def getTeamSujetsRacine(
+    email: str,
+    db: Session = Depends(get_db),
+    directory_db: Session = Depends(get_directory_db),
+):
+    return await get_team_sujets_racine_service(email, db, directory_db)
