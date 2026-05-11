@@ -1,6 +1,6 @@
 import datetime
 from app.config.database import Base
-from sqlalchemy import BigInteger, Date, ForeignKey, Column, Text, DateTime, func, Integer
+from sqlalchemy import BigInteger, Date, ForeignKey, Column, Text, DateTime, func, Integer, Boolean
 from sqlalchemy.orm import relationship
 
 class Action(Base):
@@ -16,6 +16,9 @@ class Action(Base):
     priorite = Column(Integer, nullable=True)
     responsable = Column(Text, nullable=True)
     email_responsable = Column(Text, nullable=True)
+    kpi = Column(Text, nullable=True)
+    demandeur = Column(Text, nullable=True)
+    email_demandeur = Column(Text, nullable=True)
     due_date = Column(Date(), nullable=True)
     estimated_duration_days = Column(Integer, nullable=True)
     importance = Column(Text, nullable=True)

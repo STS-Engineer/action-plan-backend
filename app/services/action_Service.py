@@ -3,7 +3,7 @@ from app.models.action import Action
 from app.models.sujet import Sujet
 from sqlalchemy import case, func
 import datetime
-
+from app.models.action_status_comment import ActionStatusComment
 from app.services.action_event_log_service import log_action_event
 from app.services.action_priority_service import (
     enrich_action_priority,
@@ -101,13 +101,20 @@ async def get_emails_service(db: Session):
     return [email[0] for email in emails if email[0] != ""]
 
 
-async def update_action_status_service(action_id: int, status: str, db: Session):
+async def update_action_status_service(
+    action_id: int,
+    status: str,
+    db: Session,
+    comment: str | None = None,
+    created_by: str | None = None,
+):
     action = db.query(Action).filter(Action.id == action_id).first()
 
     if not action:
         return {"error": "Action not found"}
 
     old_status = action.status
+
     action.status = status
 
     if status == "closed":
@@ -115,18 +122,15 @@ async def update_action_status_service(action_id: int, status: str, db: Session)
     else:
         action.closed_date = None
 
-    action.updated_at = datetime.datetime.now(datetime.timezone.utc)
-
-    log_action_event(
-        db=db,
+    status_comment = ActionStatusComment(
         action_id=action.id,
-        event_type="status_changed",
-        old_value=old_status,
-        new_value=status,
-        details="Status changed from application",
-        created_by="application",
+        old_status=old_status,
+        new_status=status,
+        comment=comment,
+        created_by=created_by,
     )
 
+    db.add(status_comment)
     db.commit()
     db.refresh(action)
 

@@ -37,7 +37,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+@app.on_event("startup")
+async def startup_event():
+    start_scheduler()
 
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    stop_scheduler()
 for router in ALL_ROUTERS:
     app.include_router(router)
 

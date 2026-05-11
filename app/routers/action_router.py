@@ -1,6 +1,6 @@
 
 from fastapi.responses import HTMLResponse
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from app.config.database import get_db
 from app.schema.actionSchema import updateActionStatusSchema
@@ -27,6 +27,10 @@ from app.services.weekly_report_service import (
 from app.services.action_search_service import (
     search_actions_service,
     
+)
+from app.services.action_attachment_service import (
+    upload_action_attachment_service,
+    get_action_attachments_service,
 )
 from app.config.directory_database import get_directory_db
 router = APIRouter(prefix="/api/action_plan_action", tags=["Action Plan"])
@@ -70,7 +74,13 @@ async def updateActionStatus(
     payload: updateActionStatusSchema,
     db: Session = Depends(get_db)
 ):
-    return await update_action_status_service(action_id, payload.status, db)
+    return await update_action_status_service(
+        action_id=action_id,
+        status=payload.status,
+        db=db,
+        comment=payload.comment,
+        created_by=payload.created_by,
+    )
 @router.post("/recalculate-priorities")
 async def recalculatePriorities(
     db: Session = Depends(get_db)
@@ -132,3 +142,24 @@ async def getTeamActions(
     directory_db: Session = Depends(get_directory_db),
 ):
     return await get_team_actions_service(email, db, directory_db)
+@router.post("/actions/{action_id}/attachments")
+async def uploadActionAttachment(
+    action_id: int,
+    file: UploadFile = File(...),
+    uploaded_by: str | None = Form(None),
+    db: Session = Depends(get_db),
+):
+    return await upload_action_attachment_service(
+        action_id=action_id,
+        file=file,
+        db=db,
+        uploaded_by=uploaded_by,
+    )
+
+
+@router.get("/actions/{action_id}/attachments")
+async def getActionAttachments(
+    action_id: int,
+    db: Session = Depends(get_db),
+):
+    return await get_action_attachments_service(action_id, db)
