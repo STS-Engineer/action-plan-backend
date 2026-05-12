@@ -23,6 +23,7 @@ from app.services.action_reminder_service import (
 from app.services.weekly_report_service import (
     send_test_weekly_responsable_reports_service,
     send_weekly_responsable_reports_service,
+    send_test_weekly_demandeur_reports_service
 )
 from app.services.action_search_service import (
     search_actions_service,
@@ -33,6 +34,7 @@ from app.services.action_attachment_service import (
     get_action_attachments_service,
 )
 from app.config.directory_database import get_directory_db
+from app.services.action_overdue_service import update_overdue_actions_service
 router = APIRouter(prefix="/api/action_plan_action", tags=["Action Plan"])
 
 @router.get("/sujets/{sujet_id}/actions")
@@ -163,3 +165,14 @@ async def getActionAttachments(
     db: Session = Depends(get_db),
 ):
     return await get_action_attachments_service(action_id, db)
+@router.post("/update-overdue-actions")
+async def updateOverdueActions(
+    db: Session = Depends(get_db),
+):
+    return await update_overdue_actions_service(db)
+@router.post("/send-test-weekly-demandeur-report")
+async def sendTestWeeklyDemandeurReport(
+    test_email: str,
+    db: Session = Depends(get_db),
+):
+    return await send_test_weekly_demandeur_reports_service(db, test_email)

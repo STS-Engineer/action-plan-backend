@@ -280,3 +280,102 @@ async def send_weekly_responsable_reports_service(db):
         "matched_responsables": len(grouped),
         "sent_emails": sent_count,
     }
+async def send_weekly_demandeur_reports_service(db):
+    actions = (
+        db.query(Action)
+        .filter(Action.status != "closed")
+        .filter(Action.email_demandeur.isnot(None))
+        .order_by(Action.priority_index.desc().nullslast(), Action.due_date.asc())
+        .all()
+    )
+
+    grouped = {}
+
+    for action in actions:
+        grouped.setdefault(action.email_demandeur, []).append(action)
+
+    sent_count = 0
+
+    for demandeur_email, demandeur_actions in grouped.items():
+        demandeur_name = demandeur_actions[0].demandeur
+
+        pdf_bytes = build_weekly_report_pdf(
+            responsable=demandeur_name,
+            actions=demandeur_actions,
+        )
+
+        html_body = build_weekly_report_email(
+            responsable=demandeur_name,
+            action_count=len(demandeur_actions),
+        )
+
+        sent = send_email(
+            to_email=demandeur_email,
+            subject=f"[Action Plan] Weekly Requester Report - {demandeur_name}",
+            html_body=html_body,
+            attachments=[
+                (
+                    f"action_plan_weekly_requester_report_{demandeur_name or 'demandeur'}.pdf",
+                    pdf_bytes,
+                )
+            ],
+        )
+
+        if sent:
+            sent_count += 1
+
+    return {
+        "message": "Weekly demandeur reports sent successfully",
+        "matched_demandeurs": len(grouped),
+        "sent_emails": sent_count,
+    }
+async def send_test_weekly_demandeur_reports_service(db, test_email: str):
+    actions = (
+        db.query(Action)
+        .filter(Action.status != "closed")
+        .filter(Action.email_demandeur.isnot(None))
+        .order_by(Action.priority_index.desc().nullslast(), Action.due_date.asc())
+        .all()
+    )
+
+    grouped = {}
+
+    for action in actions:
+        grouped.setdefault(action.email_demandeur, []).append(action)
+
+    sent_count = 0
+
+    for demandeur_email, demandeur_actions in list(grouped.items())[:1]:
+        demandeur_name = demandeur_actions[0].demandeur
+
+        pdf_bytes = build_weekly_report_pdf(
+            responsable=demandeur_name,
+            actions=demandeur_actions,
+        )
+
+        html_body = build_weekly_report_email(
+            responsable=demandeur_name,
+            action_count=len(demandeur_actions),
+        )
+
+        sent = send_email(
+            to_email=test_email,
+            subject=f"[TEST] Action Plan Weekly Requester Report - {demandeur_name}",
+            html_body=html_body,
+            attachments=[
+                (
+                    f"action_plan_weekly_requester_report_{demandeur_name or 'demandeur'}.pdf",
+                    pdf_bytes,
+                )
+            ],
+        )
+
+        if sent:
+            sent_count += 1
+
+    return {
+        "message": "Test weekly demandeur report sent successfully",
+        "test_email": test_email,
+        "matched_demandeurs": len(grouped),
+        "sent_emails": sent_count,
+    }

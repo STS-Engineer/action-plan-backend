@@ -6,8 +6,11 @@ from apscheduler.triggers.cron import CronTrigger
 
 from app.config.database import SessionLocal
 from app.services.action_reminder_service import send_grouped_due_date_reminders_service
-from app.services.weekly_report_service import send_weekly_responsable_reports_service
-
+from app.services.weekly_report_service import (
+    send_weekly_responsable_reports_service,
+    send_weekly_demandeur_reports_service,
+)
+from app.services.action_overdue_service import update_overdue_actions_service
 
 scheduler = BackgroundScheduler(timezone="Africa/Tunis")
 
@@ -20,11 +23,17 @@ async def daily_reminders_job():
     db = SessionLocal()
 
     try:
+        print("[SCHEDULER] Updating overdue actions...")
+        overdue_result = await update_overdue_actions_service(db)
+        print("[SCHEDULER] Overdue update result:", overdue_result)
+
         print("[SCHEDULER] Running daily grouped reminders...")
         result = await send_grouped_due_date_reminders_service(db)
         print("[SCHEDULER] Daily reminders result:", result)
+
     except Exception as e:
         print("[SCHEDULER] Daily reminders failed:", str(e))
+
     finally:
         db.close()
 
@@ -34,8 +43,12 @@ async def weekly_reports_job():
 
     try:
         print("[SCHEDULER] Running weekly responsable reports...")
-        result = await send_weekly_responsable_reports_service(db)
-        print("[SCHEDULER] Weekly reports result:", result)
+        responsable_result = await send_weekly_responsable_reports_service(db)
+        print("[SCHEDULER] Weekly responsable reports result:", responsable_result)
+
+        print("[SCHEDULER] Running weekly demandeur reports...")
+        demandeur_result = await send_weekly_demandeur_reports_service(db)
+        print("[SCHEDULER] Weekly demandeur reports result:", demandeur_result)
     except Exception as e:
         print("[SCHEDULER] Weekly reports failed:", str(e))
     finally:
