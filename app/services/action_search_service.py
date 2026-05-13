@@ -1,11 +1,6 @@
 from sqlalchemy import or_
 from app.models.action import Action
-from app.services.action_priority_service import (
-    enrich_action_priority,
-    get_reaction_time_days,
-    calculate_reaction_deadline,
-    is_escalation_ready
-)
+from app.services.action_Service import action_to_dict, get_latest_action_history_map
 from app.models.sujet import Sujet
 
 async def search_actions_service(query: str, db):
@@ -34,27 +29,25 @@ async def search_actions_service(query: str, db):
         .all()
     )
 
-    for action in actions:
-        enrich_action_priority(action)
-
     results = []
+    latest_history_by_action_id = get_latest_action_history_map(
+        db,
+        [action.id for action in actions],
+    )
 
     for action in actions:
-        enrich_action_priority(action)
-
         sujet = db.query(Sujet).filter(Sujet.id == action.sujet_id).first()
         root_sujet = sujet
 
         while root_sujet and root_sujet.parent_sujet_id is not None:
             root_sujet = db.query(Sujet).filter(Sujet.id == root_sujet.parent_sujet_id).first()
 
-        results.append({
-            **action.__dict__,
-            "corrective_action_app": root_sujet.code.startswith("8D") if root_sujet else False,
-            "rm_stock_app": "AP-RAW-MATERIAL" in root_sujet.code if root_sujet else False,
-            "reaction_time_days": get_reaction_time_days(action.importance),
-            "reaction_deadline": str(calculate_reaction_deadline(action.due_date, action.importance)) if action.due_date else None,
-            "escalation_ready": is_escalation_ready(action),
-        })
+        results.append(
+            action_to_dict(
+                action,
+                root_sujet=root_sujet,
+                latest_history=latest_history_by_action_id.get(action.id),
+            )
+        )
 
     return results

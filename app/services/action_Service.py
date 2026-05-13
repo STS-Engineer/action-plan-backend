@@ -3,6 +3,7 @@ from app.models.action import Action
 from app.models.sujet import Sujet
 from sqlalchemy import case, func
 import datetime
+from app.models.action_attachment import ActionAttachment
 from app.models.action_status_comment import ActionStatusComment
 from app.services.action_event_log_service import log_action_event
 from app.services.action_priority_service import (
@@ -11,6 +12,94 @@ from app.services.action_priority_service import (
     calculate_reaction_deadline,
     is_escalation_ready
 )
+
+def get_latest_action_history_map(db: Session, action_ids):
+    unique_action_ids = list({action_id for action_id in action_ids if action_id is not None})
+
+    latest_history = {
+        action_id: {
+            "last_status_comment": None,
+            "last_status_comment_by": None,
+            "last_status_comment_at": None,
+            "last_attachment_id": None,
+            "last_attachment_name": None,
+            "last_attachment_uploaded_by": None,
+            "last_attachment_created_at": None,
+        }
+        for action_id in unique_action_ids
+    }
+
+    if not unique_action_ids:
+        return latest_history
+
+    comments = (
+        db.query(ActionStatusComment)
+        .filter(ActionStatusComment.action_id.in_(unique_action_ids))
+        .order_by(
+            ActionStatusComment.action_id.asc(),
+            ActionStatusComment.created_at.desc(),
+            ActionStatusComment.id.desc(),
+        )
+        .all()
+    )
+
+    for comment in comments:
+        history = latest_history.get(comment.action_id)
+
+        if history and history["last_status_comment_at"] is None:
+            history["last_status_comment"] = comment.comment
+            history["last_status_comment_by"] = comment.created_by
+            history["last_status_comment_at"] = comment.created_at
+
+    attachments = (
+        db.query(ActionAttachment)
+        .filter(ActionAttachment.action_id.in_(unique_action_ids))
+        .order_by(
+            ActionAttachment.action_id.asc(),
+            ActionAttachment.created_at.desc(),
+            ActionAttachment.id.desc(),
+        )
+        .all()
+    )
+
+    for attachment in attachments:
+        history = latest_history.get(attachment.action_id)
+
+        if history and history["last_attachment_id"] is None:
+            history["last_attachment_id"] = attachment.id
+            history["last_attachment_name"] = attachment.file_name
+            history["last_attachment_uploaded_by"] = attachment.uploaded_by
+            history["last_attachment_created_at"] = attachment.created_at
+
+    return latest_history
+
+
+def action_to_dict(action, root_sujet=None, latest_history=None):
+    enrich_action_priority(action)
+
+    payload = {
+        **action.__dict__,
+        "reaction_time_days": get_reaction_time_days(action.importance),
+        "reaction_deadline": str(calculate_reaction_deadline(action.due_date, action.importance)) if action.due_date else None,
+        "escalation_ready": is_escalation_ready(action),
+    }
+
+    root_code = root_sujet.code if root_sujet and root_sujet.code else ""
+    payload["corrective_action_app"] = root_code.startswith("8D")
+    payload["rm_stock_app"] = "AP-RAW-MATERIAL" in root_code
+
+    payload.update(latest_history or {
+        "last_status_comment": None,
+        "last_status_comment_by": None,
+        "last_status_comment_at": None,
+        "last_attachment_id": None,
+        "last_attachment_name": None,
+        "last_attachment_uploaded_by": None,
+        "last_attachment_created_at": None,
+    })
+
+    return payload
+
 
 async def get_actions_by_sujet_id_service(sujet_id: int, db: Session):
     actions = (
@@ -27,18 +116,19 @@ async def get_actions_by_sujet_id_service(sujet_id: int, db: Session):
         root_sujet = db.query(Sujet).filter(Sujet.id == root_sujet.parent_sujet_id).first()
 
     result = []
+    latest_history_by_action_id = get_latest_action_history_map(
+        db,
+        [action.id for action in actions],
+    )
 
     for action in actions:
-        enrich_action_priority(action)
-
-        result.append({
-            **action.__dict__,
-            "corrective_action_app": root_sujet.code.startswith("8D") if root_sujet else False,
-            "rm_stock_app": "AP-RAW-MATERIAL" in root_sujet.code if root_sujet else False,
-            "reaction_time_days": get_reaction_time_days(action.importance),
-            "reaction_deadline": str(calculate_reaction_deadline(action.due_date, action.importance)) if action.due_date else None,
-            "escalation_ready": is_escalation_ready(action),
-        })
+        result.append(
+            action_to_dict(
+                action,
+                root_sujet=root_sujet,
+                latest_history=latest_history_by_action_id.get(action.id),
+            )
+        )
 
     return result
 
@@ -55,7 +145,19 @@ async def get_sous_actions_by_action_id_service(action_id: int, db: Session):
         .order_by(Action.ordre.asc(), Action.created_at.desc())
         .all()
     )
-    return sous_actions
+
+    latest_history_by_action_id = get_latest_action_history_map(
+        db,
+        [action.id for action in sous_actions],
+    )
+
+    return [
+        action_to_dict(
+            action,
+            latest_history=latest_history_by_action_id.get(action.id),
+        )
+        for action in sous_actions
+    ]
 
 
 async def get_statistiques_service(db: Session):
@@ -158,15 +260,6 @@ async def get_action_status_comments_service(action_id: int, db: Session):
         for comment in comments
     ]
 
-def action_to_dict(action):
-    enrich_action_priority(action)
-
-    return {
-        **action.__dict__,
-        "reaction_time_days": get_reaction_time_days(action.importance),
-        "reaction_deadline": str(calculate_reaction_deadline(action.due_date, action.importance)) if action.due_date else None,
-        "escalation_ready": is_escalation_ready(action),
-    }
 async def get_my_actions_service(email: str, db: Session):
     actions = (
         db.query(Action)
@@ -178,7 +271,18 @@ async def get_my_actions_service(email: str, db: Session):
         .all()
     )
 
-    return [action_to_dict(action) for action in actions]
+    latest_history_by_action_id = get_latest_action_history_map(
+        db,
+        [action.id for action in actions],
+    )
+
+    return [
+        action_to_dict(
+            action,
+            latest_history=latest_history_by_action_id.get(action.id),
+        )
+        for action in actions
+    ]
 async def get_team_actions_service(email: str, db: Session, directory_db):
     from app.services.directory_service import get_all_underlings
 
@@ -205,9 +309,20 @@ async def get_team_actions_service(email: str, db: Session, directory_db):
         .all()
     )
 
+    latest_history_by_action_id = get_latest_action_history_map(
+        db,
+        [action.id for action in actions],
+    )
+
     return {
         "team_members": len(underling_emails),
-        "actions": [action_to_dict(action) for action in actions],
+        "actions": [
+            action_to_dict(
+                action,
+                latest_history=latest_history_by_action_id.get(action.id),
+            )
+            for action in actions
+        ],
     }
 async def mark_action_closed_from_email_service(action_id: int, db):
     action = db.query(Action).filter(Action.id == action_id).first()
