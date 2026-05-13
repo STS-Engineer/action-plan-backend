@@ -136,6 +136,28 @@ async def update_action_status_service(
 
     return action
 
+
+async def get_action_status_comments_service(action_id: int, db: Session):
+    comments = (
+        db.query(ActionStatusComment)
+        .filter(ActionStatusComment.action_id == action_id)
+        .order_by(ActionStatusComment.created_at.desc())
+        .all()
+    )
+
+    return [
+        {
+            "id": comment.id,
+            "action_id": comment.action_id,
+            "old_status": comment.old_status,
+            "new_status": comment.new_status,
+            "comment": comment.comment,
+            "created_by": comment.created_by,
+            "created_at": comment.created_at,
+        }
+        for comment in comments
+    ]
+
 def action_to_dict(action):
     enrich_action_priority(action)
 

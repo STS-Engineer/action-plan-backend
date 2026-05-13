@@ -13,10 +13,12 @@ from app.services.action_Service import (
     get_my_actions_service,
     get_team_actions_service,
     update_action_status_service,
+    get_action_status_comments_service,
     mark_action_closed_from_email_service
 )
 from app.services.action_priority_service import recalculate_all_action_priorities_service
 from app.services.action_reminder_service import (
+    send_due_date_reminders_service,
     send_test_due_date_reminders_service,
     send_grouped_due_date_reminders_service
 )
@@ -32,6 +34,7 @@ from app.services.action_search_service import (
 from app.services.action_attachment_service import (
     upload_action_attachment_service,
     get_action_attachments_service,
+    download_action_attachment_service,
 )
 from app.config.directory_database import get_directory_db
 from app.services.action_overdue_service import update_overdue_actions_service
@@ -165,6 +168,22 @@ async def getActionAttachments(
     db: Session = Depends(get_db),
 ):
     return await get_action_attachments_service(action_id, db)
+
+
+@router.get("/actions/{action_id}/status-comments")
+async def getActionStatusComments(
+    action_id: int,
+    db: Session = Depends(get_db),
+):
+    return await get_action_status_comments_service(action_id, db)
+
+
+@router.get("/attachments/{attachment_id}/download")
+async def downloadActionAttachment(
+    attachment_id: int,
+    db: Session = Depends(get_db),
+):
+    return await download_action_attachment_service(attachment_id, db)
 @router.post("/update-overdue-actions")
 async def updateOverdueActions(
     db: Session = Depends(get_db),

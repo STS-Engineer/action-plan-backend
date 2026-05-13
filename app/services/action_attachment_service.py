@@ -1,6 +1,7 @@
 import os
 import shutil
-from fastapi import UploadFile
+from fastapi import HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.models.action import Action
@@ -59,4 +60,45 @@ async def get_action_attachments_service(action_id: int, db: Session):
         .all()
     )
 
-    return attachments
+    return [
+        {
+            "id": attachment.id,
+            "action_id": attachment.action_id,
+            "file_name": attachment.file_name,
+            "file_path": attachment.file_path,
+            "uploaded_by": attachment.uploaded_by,
+            "created_at": attachment.created_at,
+        }
+        for attachment in attachments
+    ]
+
+
+async def download_action_attachment_service(attachment_id: int, db: Session):
+    attachment = (
+        db.query(ActionAttachment)
+        .filter(ActionAttachment.id == attachment_id)
+        .first()
+    )
+
+    if not attachment:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+
+    upload_root = os.path.abspath(UPLOAD_ROOT)
+    file_path = os.path.abspath(attachment.file_path)
+
+    try:
+        is_inside_upload_root = os.path.commonpath([upload_root, file_path]) == upload_root
+    except ValueError:
+        is_inside_upload_root = False
+
+    if not is_inside_upload_root:
+        raise HTTPException(status_code=404, detail="Attachment file not found")
+
+    if not os.path.isfile(file_path):
+        raise HTTPException(status_code=404, detail="Attachment file not found")
+
+    return FileResponse(
+        path=file_path,
+        filename=attachment.file_name,
+        media_type="application/octet-stream",
+    )
