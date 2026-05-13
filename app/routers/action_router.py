@@ -16,7 +16,7 @@ from app.services.action_Service import (
     get_action_status_comments_service,
     mark_action_closed_from_email_service
 )
-from app.services.action_priority_service import recalculate_all_action_priorities_service
+from app.services.action_priority_service import recalculate_all_priorities_service
 from app.services.action_reminder_service import (
     send_due_date_reminders_service,
     send_test_due_date_reminders_service,
@@ -90,7 +90,7 @@ async def updateActionStatus(
 async def recalculatePriorities(
     db: Session = Depends(get_db)
 ):
-    return await recalculate_all_action_priorities_service(db)
+    return await recalculate_all_priorities_service(db)
 @router.post("/send-due-date-reminders")
 async def sendDueDateReminders(
     db: Session = Depends(get_db)

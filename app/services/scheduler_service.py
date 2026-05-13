@@ -6,6 +6,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from app.config.database import SessionLocal
 from app.services.action_reminder_service import send_grouped_due_date_reminders_service
+from app.services.action_priority_service import recalculate_all_priorities_service
 from app.services.weekly_report_service import (
     send_weekly_responsable_reports_service,
     send_weekly_demandeur_reports_service,
@@ -26,6 +27,10 @@ async def daily_reminders_job():
         print("[SCHEDULER] Updating overdue actions...")
         overdue_result = await update_overdue_actions_service(db)
         print("[SCHEDULER] Overdue update result:", overdue_result)
+
+        print("[SCHEDULER] Recalculating priorities...")
+        priority_result = await recalculate_all_priorities_service(db)
+        print("[SCHEDULER] Priority recalculation result:", priority_result)
 
         print("[SCHEDULER] Running daily grouped reminders...")
         result = await send_grouped_due_date_reminders_service(db)

@@ -112,7 +112,7 @@ def build_responsable_summary_email(responsable, reminder_action_ids, actions):
 
         row_bg = "#fff7ed" if is_reminder else "#ffffff"
 
-        urgency_color = "#dc2626" if action.urgency == "urgent" else "#2563eb"
+        urgency_color = "#dc2626" if (action.urgency or "").lower() == "urgent" else "#2563eb"
         status_color = "#16a34a" if action.status == "closed" else "#f97316"
 
         complete_url = f"http://127.0.0.1:8000/api/action_plan_action/actions/{action.id}/mark-closed-from-email"
