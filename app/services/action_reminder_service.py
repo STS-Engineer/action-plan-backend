@@ -2,9 +2,12 @@ import datetime
 from app.models.action import Action
 from app.services.email_service import send_email
 from app.services.action_priority_service import enrich_action_priority
+from app.utils.action_links import build_action_frontend_url
 
 
 def build_reminder_email(action):
+    action_url = build_action_frontend_url(action.id)
+
     return f"""
     <div style="font-family: Arial, sans-serif; color: #1f2937;">
       <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background: #f3f4f6;">
@@ -82,6 +85,11 @@ def build_reminder_email(action):
                   </table>
                   
                   <div style="text-align: center;">
+                    <a href="{action_url}" 
+                       style="display: inline-block; background: #0f172a; color: white; padding: 14px 28px; text-decoration: none; border-radius: 8px; font-weight: bold; margin: 0 6px 10px;">
+                      View action
+                    </a>
+
                     <a href="http://127.0.0.1:8000/api/action_plan_action/actions/{action.id}/mark-closed-from-email" 
                        style="display: inline-block; background: #2563eb; color: white; padding: 14px 28px; text-decoration: none; border-radius: 8px; font-weight: bold;">
                       ✨ Mark as Complete
@@ -116,6 +124,7 @@ def build_responsable_summary_email(responsable, reminder_action_ids, actions):
         status_color = "#16a34a" if action.status == "closed" else "#f97316"
 
         complete_url = f"http://127.0.0.1:8000/api/action_plan_action/actions/{action.id}/mark-closed-from-email"
+        action_url = build_action_frontend_url(action.id)
 
         rows += f"""
         <tr style="background:{row_bg};">
@@ -152,8 +161,13 @@ def build_responsable_summary_email(responsable, reminder_action_ids, actions):
           </td>
 
           <td style="padding:10px;border-bottom:1px solid #e5e7eb;text-align:center;">
+            <a href="{action_url}"
+               style="background:#0f172a;color:white;padding:8px 12px;text-decoration:none;border-radius:8px;font-size:11px;font-weight:700;display:inline-block;margin-bottom:6px;">
+               View action
+            </a>
+
             <a href="{complete_url}"
-               style="background:#2563eb;color:white;padding:8px 12px;text-decoration:none;border-radius:8px;font-size:11px;font-weight:700;">
+               style="background:#2563eb;color:white;padding:8px 12px;text-decoration:none;border-radius:8px;font-size:11px;font-weight:700;display:inline-block;">
                Complete
             </a>
           </td>

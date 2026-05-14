@@ -1,3 +1,4 @@
+from fastapi import HTTPException
 from sqlalchemy.orm import Session
 from app.models.action import Action
 from app.models.sujet import Sujet
@@ -101,6 +102,43 @@ def action_to_dict(action, root_sujet=None, latest_history=None):
     return payload
 
 
+def action_detail_to_dict(action, root_sujet=None, latest_history=None):
+    enrich_action_priority(action)
+
+    root_code = root_sujet.code if root_sujet and root_sujet.code else ""
+
+    payload = {
+        "id": action.id,
+        "titre": action.titre,
+        "description": action.description,
+        "status": action.status,
+        "responsable": action.responsable,
+        "email_responsable": action.email_responsable,
+        "sujet_id": action.sujet_id,
+        "parent_action_id": action.parent_action_id,
+        "due_date": action.due_date,
+        "closed_date": action.closed_date,
+        "priority_index": action.priority_index,
+        "priorite": action.priorite,
+        "importance": action.importance,
+        "urgency": action.urgency,
+        "corrective_action_app": root_code.startswith("8D"),
+        "rm_stock_app": "AP-RAW-MATERIAL" in root_code,
+    }
+
+    payload.update(latest_history or {
+        "last_status_comment": None,
+        "last_status_comment_by": None,
+        "last_status_comment_at": None,
+        "last_attachment_id": None,
+        "last_attachment_name": None,
+        "last_attachment_uploaded_by": None,
+        "last_attachment_created_at": None,
+    })
+
+    return payload
+
+
 async def get_actions_by_sujet_id_service(sujet_id: int, db: Session):
     actions = (
         db.query(Action)
@@ -135,7 +173,23 @@ async def get_actions_by_sujet_id_service(sujet_id: int, db: Session):
 
 async def get_action_by_id_service(action_id: int, db: Session):
     action = db.query(Action).filter(Action.id == action_id).first()
-    return action
+
+    if not action:
+        raise HTTPException(status_code=404, detail="Action not found")
+
+    sujet = db.query(Sujet).filter(Sujet.id == action.sujet_id).first()
+    root_sujet = sujet
+
+    while root_sujet and root_sujet.parent_sujet_id is not None:
+        root_sujet = db.query(Sujet).filter(Sujet.id == root_sujet.parent_sujet_id).first()
+
+    latest_history_by_action_id = get_latest_action_history_map(db, [action.id])
+
+    return action_detail_to_dict(
+        action,
+        root_sujet=root_sujet,
+        latest_history=latest_history_by_action_id.get(action.id),
+    )
 
 
 async def get_sous_actions_by_action_id_service(action_id: int, db: Session):

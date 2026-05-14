@@ -15,10 +15,54 @@ from reportlab.platypus import (
 from app.models.action import Action
 from app.services.action_priority_service import enrich_action_priority
 from app.services.email_service import send_email
+from app.utils.action_links import build_action_frontend_url
 
 
 def value_or_dash(value):
     return value if value not in [None, ""] else "—"
+
+
+def build_action_links_section(actions: list[Action] | None):
+    if not actions:
+        return ""
+
+    rows = ""
+
+    for action in actions:
+        action_url = build_action_frontend_url(action.id)
+
+        rows += f"""
+          <tr>
+            <td style="padding:10px;border-bottom:1px solid #e5e7eb;color:#0f172a;font-weight:bold;">
+              {value_or_dash(action.titre)}
+            </td>
+            <td style="padding:10px;border-bottom:1px solid #e5e7eb;color:#475569;">
+              {value_or_dash(action.due_date)}
+            </td>
+            <td style="padding:10px;border-bottom:1px solid #e5e7eb;text-align:right;">
+              <a href="{action_url}"
+                 style="background:#0f172a;color:white;padding:8px 12px;text-decoration:none;border-radius:8px;font-size:12px;font-weight:bold;">
+                View action
+              </a>
+            </td>
+          </tr>
+        """
+
+    return f"""
+      <div style="margin:18px 0;">
+        <div style="font-size:13px;color:#334155;font-weight:bold;margin-bottom:8px;">
+          Direct action links
+        </div>
+        <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;">
+          <tr style="background:#f8fafc;">
+            <th style="padding:10px;text-align:left;font-size:11px;color:#64748b;">Action</th>
+            <th style="padding:10px;text-align:left;font-size:11px;color:#64748b;">Due date</th>
+            <th style="padding:10px;text-align:right;font-size:11px;color:#64748b;">Open</th>
+          </tr>
+          {rows}
+        </table>
+      </div>
+    """
 
 
 def build_weekly_report_pdf(responsable: str, actions: list[Action]) -> bytes:
@@ -68,12 +112,14 @@ def build_weekly_report_pdf(responsable: str, actions: list[Action]) -> bytes:
         "Fichier joint",
         "Date fin souhaitée",
         "Statut",
+        "Lien",
     ]
 
     data = [headers]
 
     for action in actions:
         enrich_action_priority(action)
+        action_url = build_action_frontend_url(action.id)
 
         data.append([
             value_or_dash(action.priority_index),
@@ -89,22 +135,24 @@ def build_weekly_report_pdf(responsable: str, actions: list[Action]) -> bytes:
             "—",
             str(value_or_dash(action.due_date)),
             value_or_dash(action.status),
+            Paragraph(f'<a href="{action_url}" color="blue">View action</a>', normal_style),
         ])
 
     col_widths = [
         55,   # Index priorité
-        130,  # Sujet
-        180,  # Raison demande
-        65,   # Origine
+        120,  # Sujet
+        155,  # Raison demande
+        55,   # Origine
         130,  # Tâche
-        70,   # Demandeur
-        70,   # Attendus
-        120,  # Responsable
+        60,   # Demandeur
+        60,   # Attendus
+        105,  # Responsable
         65,   # Temps estimé
-        85,   # Compte rendu
-        70,   # Fichier joint
+        75,   # Compte rendu
+        55,   # Fichier joint
         85,   # Date fin souhaitée
         65,   # Statut
+        80,   # Lien
     ]
 
     table = Table(data, colWidths=col_widths, repeatRows=1)
@@ -125,7 +173,7 @@ def build_weekly_report_pdf(responsable: str, actions: list[Action]) -> bytes:
 
         ("ALIGN", (0, 1), (0, -1), "CENTER"),
         ("ALIGN", (8, 1), (8, -1), "CENTER"),
-        ("ALIGN", (11, 1), (12, -1), "CENTER"),
+        ("ALIGN", (11, 1), (13, -1), "CENTER"),
 
         ("BACKGROUND", (0, 1), (-1, -1), colors.white),
         ("ROWBACKGROUNDS", (0, 1), (-1, -1), [
@@ -146,7 +194,13 @@ def build_weekly_report_pdf(responsable: str, actions: list[Action]) -> bytes:
     return pdf
 
 
-def build_weekly_report_email(responsable: str, action_count: int):
+def build_weekly_report_email(
+    responsable: str,
+    action_count: int,
+    actions: list[Action] | None = None,
+):
+    action_links_section = build_action_links_section(actions)
+
     return f"""
     <html>
       <body style="font-family:Arial,sans-serif;background:#f3f4f6;margin:0;padding:24px;">
@@ -168,6 +222,8 @@ def build_weekly_report_email(responsable: str, action_count: int):
               <div style="font-size:12px;color:#1d4ed8;font-weight:bold;">TOTAL ACTIONS</div>
               <div style="font-size:28px;font-weight:bold;color:#1e3a8a;">{action_count}</div>
             </div>
+
+            {action_links_section}
 
             <p style="color:#64748b;font-size:13px;">
               This is an automated message from the Action Plan system.
@@ -206,6 +262,7 @@ async def send_test_weekly_responsable_reports_service(db, test_email: str):
         html_body = build_weekly_report_email(
             responsable=responsable_name,
             action_count=len(responsable_actions),
+            actions=responsable_actions,
         )
 
         sent = send_email(
@@ -258,6 +315,7 @@ async def send_weekly_responsable_reports_service(db):
         html_body = build_weekly_report_email(
             responsable=responsable_name,
             action_count=len(responsable_actions),
+            actions=responsable_actions,
         )
 
         sent = send_email(
@@ -307,6 +365,7 @@ async def send_weekly_demandeur_reports_service(db):
         html_body = build_weekly_report_email(
             responsable=demandeur_name,
             action_count=len(demandeur_actions),
+            actions=demandeur_actions,
         )
 
         sent = send_email(
@@ -356,6 +415,7 @@ async def send_test_weekly_demandeur_reports_service(db, test_email: str):
         html_body = build_weekly_report_email(
             responsable=demandeur_name,
             action_count=len(demandeur_actions),
+            actions=demandeur_actions,
         )
 
         sent = send_email(
