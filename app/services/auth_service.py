@@ -6,6 +6,8 @@ from fastapi import HTTPException, status, Depends
 from app.models.user import User
 from app.services.directory_service import get_member_by_email
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from sqlalchemy.orm import Session
+from app.config.database import get_db
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer()
@@ -111,7 +113,7 @@ def login_user_service(payload, db):
     }
 def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
-    db=None,
+    db: Session = Depends(get_db),
 ):
     token = credentials.credentials
 

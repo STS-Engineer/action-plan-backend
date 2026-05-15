@@ -1,5 +1,5 @@
 import os
-from urllib.parse import urljoin
+from urllib.parse import urlencode
 
 
 def build_action_frontend_url(action_id: int) -> str:
@@ -9,6 +9,7 @@ def build_action_frontend_url(action_id: int) -> str:
         or "http://localhost:5173"
     )
 
-    normalized_base_url = base_url.rstrip("/") + "/"
+    normalized_base_url = base_url.rstrip("/")
+    query = urlencode({"actionId": action_id})
 
-    return urljoin(normalized_base_url, f"actions/{action_id}")
+    return f"{normalized_base_url}/?{query}"

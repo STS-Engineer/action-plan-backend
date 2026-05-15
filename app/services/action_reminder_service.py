@@ -1,8 +1,145 @@
 import datetime
+from html import escape
+
+from fastapi import HTTPException
 from app.models.action import Action
 from app.services.email_service import send_email
 from app.services.action_priority_service import enrich_action_priority
 from app.utils.action_links import build_action_frontend_url
+
+DEMO_ACTION_LINK_RECIPIENT = "olivier.spicker@avocarbon.com"
+
+
+def value_or_dash(value):
+    return value if value not in [None, ""] else "-"
+
+
+def escape_email_value(value):
+    return escape(str(value_or_dash(value)))
+
+
+def build_demo_action_link_email(action, action_url):
+    safe_action_url = escape(action_url, quote=True)
+
+    return f"""
+    <div style="font-family: Arial, sans-serif; color: #1f2937;">
+      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background: #f3f4f6;">
+        <tr>
+          <td align="center" style="padding: 20px;">
+            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width: 600px; width: 100%; background: #ffffff; border-radius: 12px; overflow: hidden;">
+              <tr>
+                <td style="background: linear-gradient(135deg, #2563eb, #1e40af); padding: 32px 24px; text-align: center;">
+                  <h2 style="color: #ffffff; margin: 0 0 8px 0; font-size: 28px;">Action Plan Direct Link</h2>
+                  <p style="color: #dbeafe; margin: 0; font-size: 14px;">Demo email for one action</p>
+                </td>
+              </tr>
+
+              <tr>
+                <td style="padding: 32px 24px;">
+                  <p style="color: #374151; font-size: 16px; margin: 0 0 24px 0;">
+                    Hello,
+                  </p>
+
+                  <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background: #eff6ff; border-left: 4px solid #2563eb; margin-bottom: 24px;">
+                    <tr>
+                      <td style="padding: 16px;">
+                        <p style="margin: 0; color: #1e40af; font-size: 14px;">
+                          Use the button below to open this exact action in the Action Plan app.
+                        </p>
+                      </td>
+                    </tr>
+                  </table>
+
+                  <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background: #f8fafc; border-radius: 12px;">
+                    <tr>
+                      <td style="padding: 16px; border-bottom: 1px solid #e2e8f0;">
+                        <div style="font-size: 11px; font-weight: bold; color: #64748b;">ACTION TITLE</div>
+                        <div style="font-size: 16px; font-weight: bold; color: #1e293b;">{escape_email_value(action.titre)}</div>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td style="padding: 16px; border-bottom: 1px solid #e2e8f0;">
+                        <div style="font-size: 11px; font-weight: bold; color: #64748b;">STATUS</div>
+                        <span style="display: inline-block; background: #f97316; color: white; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: bold;">{escape_email_value(action.status)}</span>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td style="padding: 16px;">
+                        <div style="font-size: 11px; font-weight: bold; color: #64748b;">DUE DATE</div>
+                        <div style="font-size: 14px; font-weight: bold; color: #dc2626;">{escape_email_value(action.due_date)}</div>
+                      </td>
+                    </tr>
+                  </table>
+
+                  <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background: #f0fdf4; border-radius: 8px; margin: 24px 0;">
+                    <tr>
+                      <td style="padding: 16px; text-align: center;">
+                        <div style="font-size: 11px; color: #166534;">PRIORITY INDEX</div>
+                        <div style="font-size: 32px; font-weight: bold; color: #15803d;">{escape_email_value(action.priority_index)}</div>
+                      </td>
+                    </tr>
+                  </table>
+
+                  <div style="text-align: center;">
+                    <a href="{safe_action_url}"
+                       style="display: inline-block; background: #2563eb; color: white; padding: 14px 28px; text-decoration: none; border-radius: 8px; font-weight: bold;">
+                      View action
+                    </a>
+                  </div>
+
+                  <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 24px 0;">
+
+                  <p style="color: #6b7280; font-size: 12px; text-align: center;">
+                    Best regards,<br/>
+                    <strong>Action Plan System</strong>
+                  </p>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+      </table>
+    </div>
+    """
+
+
+async def send_demo_action_link_to_olivier_service(
+    action_id: int,
+    db,
+    test_email: str | None = None,
+):
+    action = db.query(Action).filter(Action.id == action_id).first()
+
+    if not action:
+        raise HTTPException(status_code=404, detail="Action not found")
+
+    recipient = test_email or DEMO_ACTION_LINK_RECIPIENT
+    action_url = build_action_frontend_url(action.id)
+    html_body = build_demo_action_link_email(action, action_url)
+
+    send_error = None
+
+    try:
+        sent = send_email(
+            to_email=recipient,
+            subject="[DEMO] Action Plan - Direct action link",
+            html_body=html_body,
+        )
+    except Exception as exc:
+        sent = False
+        send_error = str(exc)
+
+    response = {
+        "sent": sent,
+        "to_email": recipient,
+        "action_id": action.id,
+        "generated_url": action_url,
+    }
+
+    if send_error:
+        response["error"] = send_error
+
+    return response
 
 
 def build_reminder_email(action):

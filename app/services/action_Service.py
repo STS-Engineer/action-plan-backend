@@ -13,6 +13,7 @@ from app.services.action_priority_service import (
     calculate_reaction_deadline,
     is_escalation_ready
 )
+from app.services.action_access_service import normalize_access_email
 
 def get_latest_action_history_map(db: Session, action_ids):
     unique_action_ids = list({action_id for action_id in action_ids if action_id is not None})
@@ -315,9 +316,14 @@ async def get_action_status_comments_service(action_id: int, db: Session):
     ]
 
 async def get_my_actions_service(email: str, db: Session):
+    normalized_email = normalize_access_email(email)
+
+    if not normalized_email:
+        return []
+
     actions = (
         db.query(Action)
-        .filter(Action.email_responsable.ilike(email))
+        .filter(func.lower(func.coalesce(Action.email_responsable, "")) == normalized_email)
         .order_by(
             Action.priority_index.desc().nullslast(),
             Action.due_date.asc().nullslast(),
@@ -340,12 +346,24 @@ async def get_my_actions_service(email: str, db: Session):
 async def get_team_actions_service(email: str, db: Session, directory_db):
     from app.services.directory_service import get_all_underlings
 
-    underlings = get_all_underlings(directory_db, email)
+    normalized_email = normalize_access_email(email)
+
+    if not normalized_email:
+        return {
+            "team_members": 0,
+            "actions": [],
+        }
+
+    underlings = get_all_underlings(directory_db, normalized_email)
     underling_emails = [
-        member.email.lower()
-        for member in underlings
-        if member.email
+        normalized_underling_email
+        for normalized_underling_email in (
+            normalize_access_email(member.email)
+            for member in underlings
+        )
+        if normalized_underling_email
     ]
+    underling_emails = list(dict.fromkeys(underling_emails))
 
     if not underling_emails:
         return {
@@ -355,7 +373,7 @@ async def get_team_actions_service(email: str, db: Session, directory_db):
 
     actions = (
         db.query(Action)
-        .filter(Action.email_responsable.in_(underling_emails))
+        .filter(func.lower(func.coalesce(Action.email_responsable, "")).in_(underling_emails))
         .order_by(
             Action.priority_index.desc().nullslast(),
             Action.due_date.asc().nullslast(),

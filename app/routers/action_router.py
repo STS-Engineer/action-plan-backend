@@ -1,9 +1,12 @@
 
 from fastapi.responses import HTMLResponse
+from fastapi.responses import JSONResponse
 from fastapi import APIRouter, Depends, Query, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from app.config.database import get_db
 from app.schema.actionSchema import updateActionStatusSchema
+from app.models.action import Action
+from app.models.user import User
 from app.services.action_Service import (
     get_actions_by_sujet_id_service,
     get_action_by_id_service,
@@ -20,7 +23,8 @@ from app.services.action_priority_service import recalculate_all_priorities_serv
 from app.services.action_reminder_service import (
     send_due_date_reminders_service,
     send_test_due_date_reminders_service,
-    send_grouped_due_date_reminders_service
+    send_grouped_due_date_reminders_service,
+    send_demo_action_link_to_olivier_service
 )
 from app.services.weekly_report_service import (
     send_test_weekly_responsable_reports_service,
@@ -31,6 +35,11 @@ from app.services.action_search_service import (
     search_actions_service,
     
 )
+from app.services.action_access_service import (
+    action_access_summary,
+    can_access_action,
+    normalize_access_email,
+)
 from app.services.action_attachment_service import (
     upload_action_attachment_service,
     get_action_attachments_service,
@@ -38,6 +47,7 @@ from app.services.action_attachment_service import (
 )
 from app.config.directory_database import get_directory_db
 from app.services.action_overdue_service import update_overdue_actions_service
+from app.services.auth_service import get_current_user
 router = APIRouter(prefix="/api/action_plan_action", tags=["Action Plan"])
 
 @router.get("/sujets/{sujet_id}/actions")
@@ -53,6 +63,55 @@ async def getActionById(
     db: Session = Depends(get_db)
 ):
     return await get_action_by_id_service(action_id, db)
+
+
+@router.get("/actions/{action_id}/access")
+async def getActionAccess(
+    action_id: int,
+    email: str = Query(...),
+    db: Session = Depends(get_db),
+    directory_db: Session = Depends(get_directory_db),
+    current_user: User = Depends(get_current_user),
+):
+    requested_email = normalize_access_email(email)
+    token_email = normalize_access_email(current_user.email)
+
+    if not requested_email or requested_email != token_email:
+        return JSONResponse(
+            status_code=403,
+            content={
+                "allowed": False,
+                "reason": "forbidden",
+            },
+        )
+
+    action = db.query(Action).filter(Action.id == action_id).first()
+
+    if not action:
+        return JSONResponse(
+            status_code=403,
+            content={
+                "allowed": False,
+                "reason": "forbidden",
+            },
+        )
+
+    access = can_access_action(requested_email, action, directory_db)
+
+    if not access["allowed"]:
+        return JSONResponse(
+            status_code=403,
+            content={
+                "allowed": False,
+                "reason": "forbidden",
+            },
+        )
+
+    return {
+        "allowed": True,
+        "scope": access["scope"],
+        "action": action_access_summary(action),
+    }
 
 @router.get("/actions/{action_id}/sous-actions")
 async def getSousActionsByActionId(
@@ -107,6 +166,13 @@ async def sendGroupedDueDateReminders(
     db: Session = Depends(get_db)
 ):
     return await send_grouped_due_date_reminders_service(db)
+@router.post("/send-demo-action-link-to-olivier")
+async def sendDemoActionLinkToOlivier(
+    action_id: int = Query(...),
+    test_email: str | None = Query(None),
+    db: Session = Depends(get_db),
+):
+    return await send_demo_action_link_to_olivier_service(action_id, db, test_email)
 @router.get("/actions/{action_id}/mark-closed-from-email", response_class=HTMLResponse)
 async def markActionClosedFromEmail(
     action_id: int,
@@ -129,9 +195,12 @@ async def sendWeeklyReports(
 @router.get("/search")
 async def searchActions(
     query: str,
-    db: Session = Depends(get_db)
+    email: str | None = Query(None),
+    scope: str | None = Query(None),
+    db: Session = Depends(get_db),
+    directory_db: Session = Depends(get_directory_db),
 ):
-    return await search_actions_service(query, db)
+    return await search_actions_service(query, db, email=email, scope=scope, directory_db=directory_db)
 @router.get("/my-actions")
 async def getMyActions(
     email: str,
