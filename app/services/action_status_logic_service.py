@@ -108,7 +108,7 @@ def get_action_in_progress_predicate(action_like=Action):
 
     return and_(
         get_action_visible_from_home_predicate(action_like),
-        status_expr != CLOSED_HOME_BUCKET,
+        status_expr.in_(["open", "blocked"]),
         ~get_action_overdue_predicate(action_like),
     )
 

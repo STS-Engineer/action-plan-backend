@@ -1,7 +1,9 @@
 
 from fastapi.responses import HTMLResponse
 from fastapi.responses import JSONResponse
-from fastapi import APIRouter, Depends, Query, UploadFile, File, Form
+from typing import Literal
+
+from fastapi import APIRouter, Depends, Query, UploadFile, File, Form, HTTPException
 from sqlalchemy.orm import Session
 from app.config.database import get_db
 from app.schema.actionSchema import updateActionStatusSchema
@@ -15,6 +17,7 @@ from app.services.action_Service import (
     get_emails_service,
     get_my_actions_service,
     get_team_actions_service,
+    get_filtered_actions_service,
     update_action_status_service,
     get_action_status_comments_service,
     mark_action_closed_from_email_service
@@ -201,6 +204,32 @@ async def searchActions(
     directory_db: Session = Depends(get_directory_db),
 ):
     return await search_actions_service(query, db, email=email, scope=scope, directory_db=directory_db)
+
+
+@router.get("/filtered-actions")
+async def getFilteredActions(
+    email: str = Query(...),
+    scope: Literal["my", "team"] = Query("my"),
+    status: Literal["overdue", "closed", "in_progress", "all"] = Query("all"),
+    db: Session = Depends(get_db),
+    directory_db: Session = Depends(get_directory_db),
+    current_user: User = Depends(get_current_user),
+):
+    requested_email = normalize_access_email(email)
+    token_email = normalize_access_email(current_user.email)
+
+    if not requested_email or requested_email != token_email:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    return await get_filtered_actions_service(
+        email=requested_email,
+        scope=scope,
+        status=status,
+        db=db,
+        directory_db=directory_db,
+    )
+
+
 @router.get("/my-actions")
 async def getMyActions(
     email: str,
@@ -251,8 +280,15 @@ async def getActionStatusComments(
 async def downloadActionAttachment(
     attachment_id: int,
     db: Session = Depends(get_db),
+    directory_db: Session = Depends(get_directory_db),
+    current_user: User = Depends(get_current_user),
 ):
-    return await download_action_attachment_service(attachment_id, db)
+    return await download_action_attachment_service(
+        attachment_id=attachment_id,
+        db=db,
+        logged_user_email=current_user.email,
+        directory_db=directory_db,
+    )
 @router.post("/update-overdue-actions")
 async def updateOverdueActions(
     db: Session = Depends(get_db),

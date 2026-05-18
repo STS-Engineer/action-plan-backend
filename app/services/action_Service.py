@@ -2,7 +2,7 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 from app.models.action import Action
 from app.models.sujet import Sujet
-from sqlalchemy import case, func
+from sqlalchemy import and_, case, func
 import datetime
 from app.models.action_attachment import ActionAttachment
 from app.models.action_status_comment import ActionStatusComment
@@ -14,6 +14,14 @@ from app.services.action_priority_service import (
     is_escalation_ready
 )
 from app.services.action_access_service import normalize_access_email
+from app.services.action_status_logic_service import (
+    get_action_home_bucket,
+    get_action_home_bucket_predicate,
+    get_action_overdue_predicate,
+    get_action_visible_from_home_predicate,
+    normalize_action_status,
+    get_normalized_action_status_expression,
+)
 
 def get_latest_action_history_map(db: Session, action_ids):
     unique_action_ids = list({action_id for action_id in action_ids if action_id is not None})
@@ -138,6 +146,185 @@ def action_detail_to_dict(action, root_sujet=None, latest_history=None):
     })
 
     return payload
+
+
+def build_sujet_path_info_map(db: Session, sujet_ids):
+    pending_ids = {
+        sujet_id
+        for sujet_id in sujet_ids
+        if sujet_id is not None
+    }
+    sujets_by_id = {}
+
+    while pending_ids:
+        sujets = (
+            db.query(Sujet)
+            .filter(Sujet.id.in_(pending_ids))
+            .all()
+        )
+        pending_ids = set()
+
+        for sujet in sujets:
+            if sujet.id in sujets_by_id:
+                continue
+
+            sujets_by_id[sujet.id] = sujet
+
+            if sujet.parent_sujet_id and sujet.parent_sujet_id not in sujets_by_id:
+                pending_ids.add(sujet.parent_sujet_id)
+
+    path_info_by_sujet_id = {}
+
+    for sujet_id in sujet_ids:
+        path = []
+        visited_ids = set()
+        current_sujet = sujets_by_id.get(sujet_id)
+
+        while current_sujet and current_sujet.id not in visited_ids:
+            path.append(current_sujet)
+            visited_ids.add(current_sujet.id)
+            current_sujet = sujets_by_id.get(current_sujet.parent_sujet_id)
+
+        path.reverse()
+
+        root_sujet = path[0] if path else None
+        nearest_sujet = path[-1] if path else None
+
+        path_info_by_sujet_id[sujet_id] = {
+            "root_sujet": root_sujet,
+            "root_sujet_title": root_sujet.titre if root_sujet else None,
+            "sujet_title": nearest_sujet.titre if nearest_sujet else None,
+            "topic_path": " > ".join(
+                sujet.titre
+                for sujet in path
+                if sujet.titre
+            ) or None,
+        }
+
+    return path_info_by_sujet_id
+
+
+def get_team_scope_action_emails(email: str | None, directory_db) -> list[str]:
+    from app.services.directory_service import get_all_underlings
+
+    normalized_email = normalize_access_email(email)
+
+    if not normalized_email:
+        return []
+
+    underlings = get_all_underlings(directory_db, normalized_email)
+
+    return list(dict.fromkeys([
+        normalized_underling_email
+        for normalized_underling_email in (
+            normalize_access_email(member.email)
+            for member in underlings
+        )
+        if normalized_underling_email
+    ]))
+
+
+def get_flat_action_canonical_status(action) -> str | None:
+    status_bucket = get_action_home_bucket(action)
+
+    if status_bucket in {"overdue", "closed"}:
+        return status_bucket
+
+    normalized_status = normalize_action_status(getattr(action, "status", None))
+
+    if normalized_status in {"open", "blocked"}:
+        return normalized_status
+
+    return status_bucket
+
+
+async def get_filtered_actions_service(
+    email: str,
+    scope: str,
+    status: str,
+    db: Session,
+    directory_db,
+):
+    normalized_email = normalize_access_email(email)
+    normalized_scope = (scope or "my").strip().lower()
+    normalized_status = (status or "all").strip().lower()
+
+    if not normalized_email:
+        return []
+
+    if normalized_scope not in {"my", "team"}:
+        raise HTTPException(status_code=400, detail="Invalid scope")
+
+    if normalized_status not in {"all", "closed", "in_progress", "overdue"}:
+        raise HTTPException(status_code=400, detail="Invalid status")
+
+    email_responsable = func.lower(func.coalesce(Action.email_responsable, ""))
+    if normalized_status == "in_progress":
+        normalized_action_status = get_normalized_action_status_expression(Action)
+        status_predicate = and_(
+            get_action_visible_from_home_predicate(Action),
+            normalized_action_status.in_(["open", "blocked"]),
+            ~get_action_overdue_predicate(Action),
+        )
+    else:
+        status_predicate = get_action_home_bucket_predicate(
+            None if normalized_status == "all" else normalized_status,
+            Action,
+        )
+
+    filters = [status_predicate]
+
+    if normalized_scope == "team":
+        underling_emails = get_team_scope_action_emails(normalized_email, directory_db)
+
+        if not underling_emails:
+            return []
+
+        filters.append(email_responsable.in_(underling_emails))
+    else:
+        filters.append(email_responsable == normalized_email)
+
+    actions = (
+        db.query(Action)
+        .filter(*filters)
+        .order_by(
+            Action.priority_index.desc().nullslast(),
+            Action.due_date.asc().nullslast(),
+            Action.created_at.desc(),
+        )
+        .all()
+    )
+
+    latest_history_by_action_id = get_latest_action_history_map(
+        db,
+        [action.id for action in actions],
+    )
+    sujet_path_info_by_id = build_sujet_path_info_map(
+        db,
+        [action.sujet_id for action in actions],
+    )
+
+    result = []
+
+    for action in actions:
+        sujet_info = sujet_path_info_by_id.get(action.sujet_id, {})
+        status_bucket = get_action_home_bucket(action)
+        payload = action_to_dict(
+            action,
+            root_sujet=sujet_info.get("root_sujet"),
+            latest_history=latest_history_by_action_id.get(action.id),
+        )
+        payload.pop("_sa_instance_state", None)
+        payload.update({
+            "topic_path": sujet_info.get("topic_path"),
+            "sujet_title": sujet_info.get("sujet_title"),
+            "root_sujet_title": sujet_info.get("root_sujet_title"),
+            "status_bucket": status_bucket,
+            "canonical_status": get_flat_action_canonical_status(action),
+        })
+        result.append(payload)
+
+    return result
 
 
 async def get_actions_by_sujet_id_service(sujet_id: int, db: Session):
