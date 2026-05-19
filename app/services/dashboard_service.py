@@ -17,6 +17,15 @@ from app.services.directory_service import get_all_underlings, normalize_email
 
 
 SUPPORTED_SCOPES = {"my", "team", "global"}
+SUPPORTED_CHART_KEYS = {
+    "priority_distribution",
+    "status_distribution",
+    "people_late_pareto",
+    "urgency_pareto",
+    "department_overdue",
+    "site_overdue",
+    "late_vs_in_progress",
+}
 PRIORITY_HIGH_THRESHOLD = 9
 TOP_LIMIT = 10
 TOP_CRITICAL_LIMIT = 12
@@ -24,6 +33,11 @@ TOP_CRITICAL_LIMIT = 12
 
 def normalize_dimension(value):
     return str(value).strip() if value not in [None, ""] else "Unknown"
+
+
+def normalize_bucket_key(value):
+    normalized = normalize_dimension(value).lower()
+    return "".join(character if character.isalnum() else "_" for character in normalized).strip("_")
 
 
 def normalize_urgency_bucket(value):
@@ -61,6 +75,21 @@ def get_priority_bucket(priority_index):
         return "Low"
 
     return "Unknown"
+
+
+def get_status_bucket_from_chart_bucket(bucket):
+    normalized_bucket = normalize_bucket_key(bucket)
+
+    if normalized_bucket in {"late", "overdue"}:
+        return OVERDUE_HOME_BUCKET
+
+    if normalized_bucket in {"in_progress", "inprogress", "open"}:
+        return IN_PROGRESS_HOME_BUCKET
+
+    if normalized_bucket in {"completed", "complete", "closed", "done"}:
+        return CLOSED_HOME_BUCKET
+
+    return None
 
 
 def build_pareto(counter, value_key, limit=TOP_LIMIT):
@@ -147,6 +176,75 @@ def serialize_action(action, member, bucket, escalation_ready):
         "department": normalize_dimension(member.department if member else None),
         "country": normalize_dimension(member.country if member else None),
     }
+
+
+def build_topic_path(sujet):
+    parts = []
+    visited_ids = set()
+    current = sujet
+
+    while current and current.id not in visited_ids:
+        parts.append(current.titre or current.code or f"Sujet {current.id}")
+        visited_ids.add(current.id)
+        current = current.parent
+
+    return " > ".join(reversed(parts)) if parts else None
+
+
+def serialize_drilldown_action(action, bucket):
+    return {
+        "id": action.id,
+        "titre": action.titre,
+        "status": action.status,
+        "canonical_status": bucket,
+        "importance": action.importance,
+        "urgency": action.urgency,
+        "priority_index": action.priority_index,
+        "responsable": action.responsable,
+        "email_responsable": action.email_responsable,
+        "due_date": action.due_date.isoformat() if action.due_date else None,
+        "topic_path": build_topic_path(action.sujet),
+    }
+
+
+def action_matches_drilldown_bucket(action, member, status_bucket, chart, bucket):
+    requested_bucket = normalize_bucket_key(bucket)
+
+    if chart == "priority_distribution":
+        return normalize_bucket_key(get_priority_bucket(action.priority_index)) == requested_bucket
+
+    if chart == "urgency_pareto":
+        return normalize_bucket_key(normalize_urgency_bucket(action.urgency)) == requested_bucket
+
+    if chart == "people_late_pareto":
+        if status_bucket != OVERDUE_HOME_BUCKET:
+            return False
+
+        person_name = normalize_dimension(action.responsable or action.email_responsable)
+        person_email = normalize_dimension(action.email_responsable)
+
+        return requested_bucket in {
+            normalize_bucket_key(person_name),
+            normalize_bucket_key(person_email),
+        }
+
+    if chart == "department_overdue":
+        if status_bucket != OVERDUE_HOME_BUCKET:
+            return False
+
+        return normalize_bucket_key(member.department if member else None) == requested_bucket
+
+    if chart == "site_overdue":
+        if status_bucket != OVERDUE_HOME_BUCKET:
+            return False
+
+        return normalize_bucket_key(member.site if member else None) == requested_bucket
+
+    if chart in {"status_distribution", "late_vs_in_progress"}:
+        expected_status_bucket = get_status_bucket_from_chart_bucket(bucket)
+        return expected_status_bucket is not None and status_bucket == expected_status_bucket
+
+    return False
 
 
 async def get_dashboard_overview_service(
@@ -269,4 +367,71 @@ async def get_dashboard_overview_service(
             )[:TOP_LIMIT]
         ],
         "top_critical_actions": top_critical_actions,
+    }
+
+
+async def get_dashboard_drilldown_service(
+    db: Session,
+    directory_db: Session,
+    email: str,
+    scope: str,
+    chart: str,
+    bucket: str,
+):
+    normalized_scope = (scope or "global").strip().lower()
+    normalized_chart = (chart or "").strip().lower()
+
+    if normalized_scope not in SUPPORTED_SCOPES:
+        normalized_scope = "global"
+
+    if normalized_chart not in SUPPORTED_CHART_KEYS:
+        return {
+            "chart": normalized_chart,
+            "bucket": bucket,
+            "count": 0,
+            "actions": [],
+        }
+
+    today = date.today()
+    actions = get_actions_for_scope(db, directory_db, email, normalized_scope)
+    members_by_email = get_members_by_email(directory_db)
+    drilldown_actions = []
+
+    for action in actions:
+        enrich_action_priority(action)
+
+        status_bucket = get_action_home_bucket(action, today)
+
+        if status_bucket is None:
+            continue
+
+        responsible_email = action.email_responsable.lower() if action.email_responsable else None
+        member = members_by_email.get(responsible_email) if responsible_email else None
+
+        if not action_matches_drilldown_bucket(
+            action=action,
+            member=member,
+            status_bucket=status_bucket,
+            chart=normalized_chart,
+            bucket=bucket,
+        ):
+            continue
+
+        drilldown_actions.append(serialize_drilldown_action(action, status_bucket))
+
+    drilldown_actions = sorted(
+        drilldown_actions,
+        key=lambda item: (
+            item["due_date"] or "9999-12-31",
+            item["responsable"] or "",
+            item["titre"] or "",
+            item["id"],
+        ),
+    )
+
+    return {
+        "chart": normalized_chart,
+        "bucket": bucket,
+        "count": len(drilldown_actions),
+        "actions": drilldown_actions,
     }
