@@ -11,24 +11,71 @@ from azure.storage.blob import (
     ContentSettings,
     generate_blob_sas,
 )
+from dotenv import load_dotenv
 from fastapi import HTTPException
 
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONTAINER_NAME = "action-plan-files"
 SAS_EXPIRATION_MINUTES = 10
+ATTACHMENT_STORAGE_UNAVAILABLE_MESSAGE = "Attachment storage temporarily unavailable."
+ATTACHMENT_FILE_NOT_FOUND_MESSAGE = "Attachment file not found."
 _container_clients = {}
+
+
+class AttachmentStorageError(Exception):
+    pass
+
+
+class AttachmentStorageConfigError(AttachmentStorageError):
+    pass
+
+
+class AttachmentStorageUnavailableError(AttachmentStorageError):
+    pass
+
+
+def _raise_storage_unavailable(exc: Exception):
+    raise HTTPException(
+        status_code=503,
+        detail=ATTACHMENT_STORAGE_UNAVAILABLE_MESSAGE,
+    ) from exc
+
+
+def get_azure_blob_diagnostics() -> dict:
+    connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING", "").strip()
+    container_name = get_azure_storage_container_name()
+
+    return {
+        "enabled": bool(connection_string and container_name),
+        "container_name": container_name,
+    }
+
+
+def log_azure_blob_configuration() -> None:
+    diagnostics = get_azure_blob_diagnostics()
+
+    logger.info(
+        "Azure Blob attachment storage: enabled=%s container=%s",
+        diagnostics["enabled"],
+        diagnostics["container_name"],
+    )
+
+    if not diagnostics["enabled"]:
+        logger.warning(
+            "Azure Blob attachment storage is disabled or incomplete. "
+            "Check AZURE_STORAGE_CONNECTION_STRING and AZURE_STORAGE_CONTAINER."
+        )
 
 
 def get_azure_storage_connection_string() -> str:
     connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING", "").strip()
 
     if not connection_string:
-        raise HTTPException(
-            status_code=500,
-            detail="Azure storage is not configured.",
-        )
+        raise AttachmentStorageConfigError("AZURE_STORAGE_CONNECTION_STRING is not set.")
 
     return connection_string
 
@@ -71,14 +118,11 @@ def get_container_client():
 
         _container_clients[cache_key] = container_client
         return container_client
-    except HTTPException:
+    except AttachmentStorageError:
         raise
     except (AzureError, ValueError) as exc:
         logger.exception("Failed to initialize Azure Blob container.")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to initialize attachment storage.",
-        ) from exc
+        raise AttachmentStorageUnavailableError("Failed to initialize Azure Blob container.") from exc
 
 
 def build_action_attachment_blob_name(action_id: int, extension: str) -> str:
@@ -103,6 +147,13 @@ def upload_action_attachment_blob(
     )
 
     try:
+        container_name = get_azure_storage_container_name()
+        logger.debug(
+            "Attachment blob upload started action_id=%s blob_name=%s container=%s",
+            action_id,
+            blob_name,
+            container_name,
+        )
         container_client = get_container_client()
         blob_client = container_client.get_blob_client(blob_name)
         blob_client.upload_blob(
@@ -110,35 +161,76 @@ def upload_action_attachment_blob(
             overwrite=False,
             content_settings=ContentSettings(content_type=detected_content_type),
         )
-        logger.debug("Saved attachment blob: %s", blob_name)
-        return blob_name
-    except HTTPException:
-        raise
-    except AzureError as exc:
-        logger.exception("Failed to upload attachment blob.")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to upload attachment file.",
-        ) from exc
-
-
-def generate_blob_download_url(blob_name: str) -> str:
-    connection_string = get_azure_storage_connection_string()
-    connection_values = _parse_connection_string(connection_string)
-    account_name = connection_values.get("AccountName")
-    account_key = connection_values.get("AccountKey")
-
-    if not account_name or not account_key:
-        raise HTTPException(
-            status_code=500,
-            detail="Azure storage SAS is not configured.",
+        logger.debug(
+            "Attachment blob upload succeeded action_id=%s blob_name=%s container=%s",
+            action_id,
+            blob_name,
+            container_name,
         )
+        return blob_name
+    except AttachmentStorageError as exc:
+        logger.warning(
+            "Attachment blob upload unavailable action_id=%s blob_name=%s container=%s reason=%s",
+            action_id,
+            blob_name,
+            get_azure_storage_container_name(),
+            exc,
+        )
+        _raise_storage_unavailable(exc)
+    except AzureError as exc:
+        logger.exception(
+            "Attachment blob upload failed action_id=%s blob_name=%s container=%s",
+            action_id,
+            blob_name,
+            get_azure_storage_container_name(),
+        )
+        _raise_storage_unavailable(exc)
 
+
+def blob_exists(blob_name: str) -> bool:
     try:
-        container_name = get_azure_storage_container_name()
         container_client = get_container_client()
         blob_client = container_client.get_blob_client(blob_name)
         blob_client.get_blob_properties()
+        return True
+    except ResourceNotFoundError:
+        return False
+    except AttachmentStorageError as exc:
+        logger.warning(
+            "Attachment blob existence check unavailable blob_name=%s container=%s reason=%s",
+            blob_name,
+            get_azure_storage_container_name(),
+            exc,
+        )
+        _raise_storage_unavailable(exc)
+    except AzureError as exc:
+        logger.exception(
+            "Attachment blob existence check failed blob_name=%s container=%s",
+            blob_name,
+            get_azure_storage_container_name(),
+        )
+        _raise_storage_unavailable(exc)
+
+
+def generate_blob_download_url(blob_name: str, verify_exists: bool = True) -> str:
+    try:
+        connection_string = get_azure_storage_connection_string()
+        connection_values = _parse_connection_string(connection_string)
+        account_name = connection_values.get("AccountName")
+        account_key = connection_values.get("AccountKey")
+
+        if not account_name or not account_key:
+            raise AttachmentStorageConfigError(
+                "AZURE_STORAGE_CONNECTION_STRING must include AccountName and AccountKey."
+            )
+
+        container_name = get_azure_storage_container_name()
+        container_client = get_container_client()
+        blob_client = container_client.get_blob_client(blob_name)
+
+        if verify_exists:
+            blob_client.get_blob_properties()
+
         expires_at = datetime.now(timezone.utc) + timedelta(minutes=SAS_EXPIRATION_MINUTES)
         sas_token = generate_blob_sas(
             account_name=account_name,
@@ -151,15 +243,22 @@ def generate_blob_download_url(blob_name: str) -> str:
 
         return f"{blob_client.url}?{sas_token}"
     except ResourceNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="Attachment file not found") from exc
-    except HTTPException:
-        raise
+        raise HTTPException(status_code=404, detail=ATTACHMENT_FILE_NOT_FOUND_MESSAGE) from exc
+    except AttachmentStorageError as exc:
+        logger.warning(
+            "Attachment download URL unavailable blob_name=%s container=%s reason=%s",
+            blob_name,
+            get_azure_storage_container_name(),
+            exc,
+        )
+        _raise_storage_unavailable(exc)
     except (AzureError, ValueError) as exc:
-        logger.exception("Failed to generate attachment download URL.")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to generate attachment download URL.",
-        ) from exc
+        logger.exception(
+            "Attachment download URL generation failed blob_name=%s container=%s",
+            blob_name,
+            get_azure_storage_container_name(),
+        )
+        _raise_storage_unavailable(exc)
 
 
 def delete_blob_if_exists(blob_name: str) -> None:
@@ -168,7 +267,7 @@ def delete_blob_if_exists(blob_name: str) -> None:
         container_client.delete_blob(blob_name)
     except ResourceNotFoundError:
         return
-    except HTTPException:
+    except AttachmentStorageError:
         raise
     except AzureError:
         logger.exception("Failed to delete orphan attachment blob: %s", blob_name)

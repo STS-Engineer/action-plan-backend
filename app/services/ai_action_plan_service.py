@@ -63,6 +63,14 @@ def slugify_code(value: str, prefix: str = "AI") -> str:
 
 
 def humanize_prompt(prompt: str) -> str:
+    problem_match = re.search(r"^Problem:\s*(.+)$", prompt, flags=re.I | re.M)
+
+    if problem_match:
+        problem = re.sub(r"\s+", " ", problem_match.group(1)).strip(" .")
+
+        if problem:
+            return problem[0].upper() + problem[1:90]
+
     normalized = re.sub(r"\s+", " ", prompt).strip(" .")
     normalized = re.sub(r"^(create|build|make|generate)\s+(an?\s+)?", "", normalized, flags=re.I)
     normalized = normalized[:90].strip(" .")
@@ -187,20 +195,20 @@ def resolve_responsable(
 
 def normalize_action_node(
     action: ActionNode,
-    depth: int,
+    action_depth: int,
     order: int,
     inserted_by: str,
     directory_db,
     warnings: list[str],
 ) -> int:
-    if depth >= MAX_ACTION_DEPTH:
+    if action_depth >= MAX_ACTION_DEPTH:
         raise HTTPException(status_code=400, detail="Maximum action depth is 3.")
 
     action.status = normalize_status(action.status)
     action.importance = normalize_importance_value(action.importance)
     action.urgency = normalize_urgency_value(action.urgency)
     action.escalation_level = max(int(action.escalation_level or 0), 0)
-    action.type = ACTION_TYPES[depth]
+    action.type = ACTION_TYPES[action_depth]
     action.ordre = action.ordre if action.ordre is not None else order
 
     resolve_responsable(action, inserted_by, directory_db, warnings)
@@ -219,7 +227,7 @@ def normalize_action_node(
     for index, child in enumerate(action.sub_actions, start=1):
         count += normalize_action_node(
             child,
-            depth + 1,
+            action_depth + 1,
             index,
             inserted_by,
             directory_db,
@@ -231,18 +239,18 @@ def normalize_action_node(
 
 def normalize_sujet_node(
     sujet: SujetNode,
-    depth: int,
+    sujet_depth: int,
     order: int,
     plan_code: str | None,
     inserted_by: str,
     directory_db,
     warnings: list[str],
 ) -> int:
-    if depth >= MAX_SUJET_DEPTH:
+    if sujet_depth >= MAX_SUJET_DEPTH:
         raise HTTPException(status_code=400, detail="Maximum sujet depth is 3.")
 
     if not sujet.code:
-        suffix = f"{order:02d}" if depth else ""
+        suffix = f"{order:02d}" if sujet_depth else ""
         sujet.code = "-".join(part for part in [plan_code, suffix] if part) or slugify_code(sujet.titre)
 
     action_count = 0
@@ -260,7 +268,7 @@ def normalize_sujet_node(
     for index, child in enumerate(sujet.sujets, start=1):
         action_count += normalize_sujet_node(
             child,
-            depth + 1,
+            sujet_depth + 1,
             index,
             f"{sujet.code}-{index:02d}",
             inserted_by,
@@ -498,14 +506,14 @@ def ingest_action_recursive(
     db: Session,
     sujet_id: int,
     parent_action_id: int | None,
-    depth: int,
+    action_depth: int,
     order: int,
     created_action_ids: list[int],
 ) -> Action:
     action = Action(
         sujet_id=sujet_id,
         parent_action_id=parent_action_id,
-        type=ACTION_TYPES[depth],
+        type=ACTION_TYPES[action_depth],
         titre=action_node.titre,
         description=action_node.description,
         status=action_node.status,
@@ -518,7 +526,6 @@ def ingest_action_recursive(
         escalation_level=action_node.escalation_level,
         priority_index=action_node.priority_index,
         ordre=action_node.ordre if action_node.ordre is not None else order,
-        depth=depth,
         closed_date=datetime.date.today() if action_node.status == "closed" else None,
     )
 
@@ -532,7 +539,7 @@ def ingest_action_recursive(
             db,
             sujet_id=sujet_id,
             parent_action_id=action.id,
-            depth=depth + 1,
+            action_depth=action_depth + 1,
             order=index,
             created_action_ids=created_action_ids,
         )
@@ -566,7 +573,7 @@ def ingest_sujet_tree(
             db,
             sujet_id=sujet.id,
             parent_action_id=None,
-            depth=0,
+            action_depth=0,
             order=index,
             created_action_ids=created_action_ids,
         )
@@ -615,6 +622,7 @@ async def create_action_plan_service(
         "created": True,
         "plan_title": plan.plan_title,
         "plan_code": plan.plan_code,
+        "root_sujet_id": root_sujet_ids[0] if root_sujet_ids else None,
         "root_sujet_ids": root_sujet_ids,
         "created_sujet_ids": created_sujet_ids,
         "created_action_ids": created_action_ids,

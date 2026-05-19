@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from dotenv import load_dotenv
 from fastapi.middleware.cors import CORSMiddleware
 from app.routers import ALL_ROUTERS
+from app.services.azure_blob_service import log_azure_blob_configuration
 from app.services.scheduler_service import start_scheduler, stop_scheduler
 
 load_dotenv()
@@ -13,6 +14,7 @@ load_dotenv()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    log_azure_blob_configuration()
     start_scheduler()
     yield
     stop_scheduler()
@@ -39,6 +41,7 @@ app.add_middleware(
 )
 @app.on_event("startup")
 async def startup_event():
+    log_azure_blob_configuration()
     start_scheduler()
 
 

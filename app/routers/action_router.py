@@ -99,7 +99,12 @@ async def getActionAccess(
             },
         )
 
-    access = can_access_action(requested_email, action, directory_db)
+    access = can_access_action(
+        requested_email,
+        action,
+        directory_db,
+        user_role=current_user.role,
+    )
 
     if not access["allowed"]:
         return JSONResponse(
@@ -251,12 +256,17 @@ async def uploadActionAttachment(
     file: UploadFile = File(...),
     uploaded_by: str | None = Form(None),
     db: Session = Depends(get_db),
+    directory_db: Session = Depends(get_directory_db),
+    current_user: User = Depends(get_current_user),
 ):
     return await upload_action_attachment_service(
         action_id=action_id,
         file=file,
         db=db,
         uploaded_by=uploaded_by,
+        logged_user_email=current_user.email,
+        directory_db=directory_db,
+        current_user=current_user,
     )
 
 
@@ -288,6 +298,7 @@ async def downloadActionAttachment(
         db=db,
         logged_user_email=current_user.email,
         directory_db=directory_db,
+        current_user=current_user,
     )
 @router.post("/update-overdue-actions")
 async def updateOverdueActions(
