@@ -14,6 +14,7 @@ from reportlab.platypus import (
 
 from app.models.action import Action
 from app.services.action_priority_service import enrich_action_priority
+from app.services.action_status_logic_service import get_action_active_predicate
 from app.services.email_service import send_email
 from app.utils.action_links import build_action_frontend_url
 
@@ -238,6 +239,7 @@ def build_weekly_report_email(
 async def send_test_weekly_responsable_reports_service(db, test_email: str):
     actions = (
         db.query(Action)
+        .filter(get_action_active_predicate(Action))
         .filter(Action.status != "closed")
         .filter(Action.email_responsable.isnot(None))
         .order_by(Action.priority_index.desc().nullslast(), Action.due_date.asc())
@@ -291,6 +293,7 @@ async def send_test_weekly_responsable_reports_service(db, test_email: str):
 async def send_weekly_responsable_reports_service(db):
     actions = (
         db.query(Action)
+        .filter(get_action_active_predicate(Action))
         .filter(Action.status != "closed")
         .filter(Action.email_responsable.isnot(None))
         .order_by(Action.priority_index.desc().nullslast(), Action.due_date.asc())
@@ -341,6 +344,7 @@ async def send_weekly_responsable_reports_service(db):
 async def send_weekly_demandeur_reports_service(db):
     actions = (
         db.query(Action)
+        .filter(get_action_active_predicate(Action))
         .filter(Action.status != "closed")
         .filter(Action.email_demandeur.isnot(None))
         .order_by(Action.priority_index.desc().nullslast(), Action.due_date.asc())
@@ -391,6 +395,7 @@ async def send_weekly_demandeur_reports_service(db):
 async def send_test_weekly_demandeur_reports_service(db, test_email: str):
     actions = (
         db.query(Action)
+        .filter(get_action_active_predicate(Action))
         .filter(Action.status != "closed")
         .filter(Action.email_demandeur.isnot(None))
         .order_by(Action.priority_index.desc().nullslast(), Action.due_date.asc())

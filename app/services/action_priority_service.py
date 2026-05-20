@@ -5,6 +5,7 @@ from sqlalchemy import func, or_
 from app.models.action import Action
 from app.services.action_status_logic_service import (
     CLOSED_HOME_BUCKET,
+    get_action_active_predicate,
     is_action_hidden_from_home,
     normalize_action_status,
 )
@@ -228,6 +229,7 @@ def enrich_action_priority(action):
 async def recalculate_all_priorities_service(db):
     actions = (
         db.query(Action)
+        .filter(get_action_active_predicate(Action))
         .filter(
             or_(
                 Action.status.is_(None),

@@ -1,0 +1,116 @@
+{
+  "application_context": "AVOCarbon Action Plan is an enterprise follow-up application used to organize improvement work into recursive topics (sujets) and actions. Users are business users, not technical users. IA Assistant must chat naturally, ask only useful missing questions, and create structured recursive action plans internally without showing JSON.",
+  "recursive_model": {
+    "sujet": "A sujet is a topic or workstream. It can be a root topic or a child topic under another sujet. Sujets organize actions and can be nested up to the application safety depth.",
+    "action": "An action is an executable task attached to a sujet. Actions can contain sub-actions and sub-sub-actions when useful.",
+    "levels": {
+      "action": "Top-level executable action attached directly to a sujet.",
+      "sub_action": "Child action attached to a parent action.",
+      "sub_sub_action": "Third-level action used only for complex follow-up."
+    },
+    "creation_flow": "The backend validates PlanV1, SujetNode, and ActionNode structures, then create_action_plan_service recursively inserts sujets and actions. sujet_id and parent_action_id are assigned during recursive insertion. Generated database fields such as action.depth must never be inserted manually."
+  },
+  "required_action_fields": [
+    "titre",
+    "description",
+    "status",
+    "priorite",
+    "responsable",
+    "email_responsable",
+    "due_date",
+    "ordre",
+    "importance",
+    "urgency",
+    "escalation_level",
+    "priority_index",
+    "type"
+  ],
+  "allowed_values": {
+    "status": ["open", "blocked", "closed"],
+    "urgency": ["Urgent", "Flexible", "Secondaire"],
+    "importance": ["haute", "moyenne", "faible"],
+    "action_type": ["action", "sub_action", "sub_sub_action"]
+  },
+  "default_values": {
+    "status": "open",
+    "importance": "moyenne",
+    "urgency": "Flexible",
+    "escalation_level": 0,
+    "include_subactions": true,
+    "include_monitoring": true,
+    "include_escalation": false
+  },
+  "question_strategy": {
+    "principles": [
+      "Ask only for missing information that materially affects the plan.",
+      "Ask at most one or two questions in a single assistant reply.",
+      "If the user gives multiple details in one message, extract all of them and skip answered questions.",
+      "Never ask the same question again once the corresponding state field is filled.",
+      "Use the user's business words in the summary.",
+      "Never show JSON, schema names, or database implementation details to the user."
+    ],
+    "minimum_information": [
+      "objective",
+      "responsible_team",
+      "deadline",
+      "include_subactions",
+      "urgency"
+    ],
+    "vague_answer_mapping": {
+      "my team": "Use the logged user's team or the user's own responsibility context.",
+      "quality": "Interpret as Quality team; ask confirmation only if this conflicts with other context.",
+      "next week": "Use today plus seven days as the deadline.",
+      "as soon as possible": "Use Urgent urgency and a short due date.",
+      "yes add it": "Enable sub-actions, monitoring, and escalation follow-up.",
+      "normal": "Use Flexible urgency and moyenne importance.",
+      "critical": "Use Urgent urgency and haute importance.",
+      "strategic": "Keep urgency Flexible unless the user also says urgent, but make importance haute."
+    }
+  },
+  "examples": [
+    {
+      "title": "Reduce supplier delays",
+      "topics": ["Supplier Monitoring", "Logistics Coordination", "Prevention and KPI Review"],
+      "actions": [
+        "Build overdue supplier list",
+        "Agree recovery plan with critical suppliers",
+        "Track commitments weekly",
+        "Escalate blocked deliveries"
+      ]
+    },
+    {
+      "title": "Prepare customer corrective action plan",
+      "topics": ["Containment", "Root Cause Analysis", "Corrective Actions", "Customer Follow-up"],
+      "actions": [
+        "Confirm immediate containment",
+        "Analyze complaint root causes",
+        "Define corrective and preventive actions",
+        "Review weekly progress with Quality team"
+      ]
+    },
+    {
+      "title": "Improve overdue actions",
+      "topics": ["Overdue Review", "Owner Follow-up", "Escalation", "Sustainability"],
+      "actions": [
+        "Identify overdue actions by owner",
+        "Confirm recovery dates",
+        "Escalate blocked actions",
+        "Install weekly overdue review"
+      ]
+    }
+  ],
+  "example_conversations": [
+    {
+      "user": "Create urgent corrective action plan for customer complaint, assign to quality team, deadline next month, include weekly follow-up.",
+      "assistant_behavior": "Extract objective, responsible team, deadline, urgency, and monitoring from the single message. Skip follow-up questions and show a summary."
+    },
+    {
+      "user": "Improve overdue actions",
+      "assistant_behavior": "Ask who should own the plan, then ask deadline/sub-actions/urgency only if missing."
+    },
+    {
+      "user": "yes add it",
+      "assistant_behavior": "If current step is sub-actions, enable sub-actions, weekly monitoring, and escalation follow-up."
+    }
+  ]
+}

@@ -11,6 +11,7 @@ from app.services.action_status_logic_service import (
     CLOSED_HOME_BUCKET,
     IN_PROGRESS_HOME_BUCKET,
     OVERDUE_HOME_BUCKET,
+    get_action_active_predicate,
     get_action_home_bucket,
 )
 from app.services.directory_service import get_all_underlings, normalize_email
@@ -128,9 +129,10 @@ def get_members_by_email(directory_db: Session):
 
 def get_actions_for_scope(db: Session, directory_db: Session, email: str | None, scope: str):
     normalized_email = normalize_email(email)
+    active_query = db.query(Action).filter(get_action_active_predicate(Action))
 
     if scope == "global":
-        return db.query(Action).all()
+        return active_query.all()
 
     if not normalized_email:
         return []
@@ -147,13 +149,13 @@ def get_actions_for_scope(db: Session, directory_db: Session, email: str | None,
             return []
 
         return (
-            db.query(Action)
+            active_query
             .filter(func.lower(Action.email_responsable).in_(underling_emails))
             .all()
         )
 
     return (
-        db.query(Action)
+        active_query
         .filter(func.lower(Action.email_responsable) == normalized_email)
         .all()
     )

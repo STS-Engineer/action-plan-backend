@@ -1,5 +1,6 @@
 import datetime
 import json
+import logging
 import os
 import re
 
@@ -14,11 +15,21 @@ from app.models.sujet import Sujet
 from app.schemas.ai_action_plan_schema import (
     AIActionPlanDraftRequest,
     ActionNode,
+    AssistantChatRequest,
+    AssistantConversationState,
+    AssistantChatResponse,
+    AssistantCreateRequest,
+    AssistantSummary,
     PlanV1,
     SujetNode,
 )
 from app.services.action_priority_service import calculate_priority_index
+from app.services.action_status_logic_service import get_action_active_predicate
 from app.services.directory_service import get_member_by_email, normalize_email
+from app.services.ia_assistant_knowledge_service import (
+    get_ia_assistant_knowledge,
+    get_ia_assistant_prompt_context,
+)
 
 
 MAX_SUJET_DEPTH = 3
@@ -26,6 +37,17 @@ MAX_ACTION_DEPTH = 3
 MAX_TOTAL_ACTIONS = 50
 ALLOWED_STATUSES = {"open", "blocked", "closed"}
 ACTION_TYPES = ["action", "sub_action", "sub_sub_action"]
+PROMPT_POLLUTION_MARKERS = [
+    "Knowledge:",
+    "Current conversation state",
+    "Conversation history",
+    "Relevant existing action plan patterns",
+    "Create an enterprise action plan",
+    "application_context",
+    "recursive_model",
+]
+
+logger = logging.getLogger(__name__)
 
 IMPORTANCE_NORMALIZATION = {
     "high": "haute",
@@ -314,20 +336,20 @@ def build_default_draft_actions(prompt: str, inserted_by: str):
 
     return [
         SujetNode(
-            titre="Diagnosis and baseline",
-            description=f"Clarify the current situation for: {topic}.",
+            titre="Diagnosis and scope",
+            description=f"Clarify the current situation, impact, and expected result for: {topic}.",
             actions=[
                 ActionNode(
-                    titre="Collect current performance data",
-                    description="Gather overdue items, impacted suppliers, root causes, and current recovery dates.",
+                    titre="Confirm issue scope and current impact",
+                    description="List affected areas, owners, current status, impact, and immediate risks.",
                     responsable=inserted_by,
                     due_date=today + datetime.timedelta(days=3),
                     importance="haute",
                     urgency="Urgent",
                     sub_actions=[
                         ActionNode(
-                            titre="Build overdue supplier list",
-                            description="Create a single list with supplier, part, delay reason, quantity, and promised delivery date.",
+                            titre="Build the working issue list",
+                            description="Create one shared list with item, owner, due date, blocker, and latest update.",
                             responsable=inserted_by,
                             due_date=today + datetime.timedelta(days=2),
                             importance="moyenne",
@@ -336,8 +358,8 @@ def build_default_draft_actions(prompt: str, inserted_by: str):
                     ],
                 ),
                 ActionNode(
-                    titre="Identify top recurring delay causes",
-                    description="Group delays by capacity, transport, quality, forecast, and ordering issues.",
+                    titre="Identify main root causes",
+                    description="Group causes by process, people, material, method, system, and escalation needs.",
                     responsable=inserted_by,
                     due_date=today + datetime.timedelta(days=5),
                     importance="moyenne",
@@ -346,34 +368,34 @@ def build_default_draft_actions(prompt: str, inserted_by: str):
             ],
         ),
         SujetNode(
-            titre="Supplier recovery actions",
-            description="Execute short-term actions with the highest-risk suppliers.",
+            titre="Corrective execution",
+            description="Execute the actions needed to recover the situation and prevent further impact.",
             actions=[
                 ActionNode(
-                    titre="Agree recovery plan with critical suppliers",
-                    description="Confirm shipment dates, escalation contacts, and daily follow-up rhythm.",
+                    titre="Define corrective action owners and due dates",
+                    description="Assign clear owners, dates, and expected deliverables for each major corrective action.",
                     responsable=inserted_by,
                     due_date=today + datetime.timedelta(days=7),
                     importance="haute",
                     urgency="Flexible",
                     sub_actions=[
                         ActionNode(
-                            titre="Schedule supplier review meetings",
-                            description="Book reviews for suppliers with the largest overdue value or production risk.",
+                            titre="Confirm owner commitment",
+                            description="Review ownership, blockers, and realistic completion date with each owner.",
                             responsable=inserted_by,
                             due_date=today + datetime.timedelta(days=4),
                         ),
                         ActionNode(
-                            titre="Track commitments daily",
-                            description="Update committed dates and flag missed commitments for escalation.",
+                            titre="Track corrective action progress",
+                            description="Update progress, blockers, and next decisions before each review.",
                             responsable=inserted_by,
                             due_date=today + datetime.timedelta(days=10),
                         ),
                     ],
                 ),
                 ActionNode(
-                    titre="Escalate blocked deliveries",
-                    description="Escalate actions that need management, logistics, or quality support.",
+                    titre="Escalate blocked actions",
+                    description="Escalate items that need management support, cross-functional decisions, or priority arbitration.",
                     responsable=inserted_by,
                     due_date=today + datetime.timedelta(days=8),
                     importance="haute",
@@ -382,20 +404,20 @@ def build_default_draft_actions(prompt: str, inserted_by: str):
             ],
         ),
         SujetNode(
-            titre="Prevention and monitoring",
-            description="Install routines that prevent overdue deliveries from returning.",
+            titre="Monitoring and prevention",
+            description="Install follow-up routines and preventive actions so the problem does not return.",
             actions=[
                 ActionNode(
-                    titre="Create weekly supplier delivery KPI review",
-                    description="Review overdue count, overdue value, supplier commitments, and prevention actions every week.",
+                    titre="Create weekly progress review",
+                    description="Review action progress, overdue items, blockers, and expected results every week.",
                     responsable=inserted_by,
                     due_date=today + datetime.timedelta(days=14),
                     importance="moyenne",
                     urgency="Secondaire",
                 ),
                 ActionNode(
-                    titre="Define early warning triggers",
-                    description="Set triggers for late confirmations, capacity alerts, transport delays, and missing ASN updates.",
+                    titre="Define prevention and early warning triggers",
+                    description="Set triggers for repeated delays, missed commitments, blocked owners, and overdue actions.",
                     responsable=inserted_by,
                     due_date=today + datetime.timedelta(days=21),
                     importance="moyenne",
@@ -406,6 +428,77 @@ def build_default_draft_actions(prompt: str, inserted_by: str):
     ]
 
 
+def build_clean_fallback_plan(
+    objective: str,
+    inserted_by: str,
+    warnings: list[str] | None = None,
+) -> PlanV1:
+    clean_objective = extract_business_objective_from_text(objective)
+    plan_code = slugify_code(clean_objective)
+
+    return PlanV1(
+        version="1.0",
+        plan_title=clean_objective,
+        plan_code=plan_code,
+        inserted_by=inserted_by,
+        sujets=[
+            SujetNode(
+                titre=clean_objective,
+                code=plan_code,
+                description=f"Action plan for: {clean_objective}.",
+                sujets=build_default_draft_actions(clean_objective, inserted_by),
+            )
+        ],
+        warnings=warnings or [],
+    )
+
+
+def plan_contains_prompt_pollution(plan: PlanV1) -> bool:
+    values: list[str | None] = [
+        plan.plan_title,
+        plan.plan_code,
+        *list(plan.warnings or []),
+    ]
+
+    def visit_action(action: ActionNode):
+        values.extend([action.titre, action.description, *list(action.warnings or [])])
+
+        for child_action in action.sub_actions:
+            visit_action(child_action)
+
+    def visit_sujet(sujet: SujetNode):
+        values.extend([sujet.titre, sujet.code, sujet.description, *list(sujet.warnings or [])])
+
+        for action in sujet.actions:
+            visit_action(action)
+
+        for child_sujet in sujet.sujets:
+            visit_sujet(child_sujet)
+
+    for sujet in plan.sujets:
+        visit_sujet(sujet)
+
+    return any(is_prompt_polluted(value) for value in values if value)
+
+
+def sanitize_plan_or_fallback(plan: PlanV1, objective: str, inserted_by: str) -> PlanV1:
+    clean_objective = extract_business_objective_from_text(objective or plan.plan_title)
+
+    if not plan_contains_prompt_pollution(plan):
+        plan.plan_title = clean_human_text(plan.plan_title, clean_objective) or clean_objective
+        plan.plan_code = plan.plan_code or slugify_code(plan.plan_title)
+        return plan
+
+    logger.warning(
+        "IA Assistant blocked prompt-polluted draft; using clean fallback for objective=%s",
+        clean_objective,
+    )
+
+    warnings = list(plan.warnings or [])
+    warnings.append("Internal prompt text was removed; generated a clean fallback plan.")
+    return build_clean_fallback_plan(clean_objective, inserted_by, warnings=list(dict.fromkeys(warnings)))
+
+
 async def generate_llm_draft_payload(payload: AIActionPlanDraftRequest):
     api_key = os.getenv("OPENAI_API_KEY")
 
@@ -414,9 +507,12 @@ async def generate_llm_draft_payload(payload: AIActionPlanDraftRequest):
 
     model = os.getenv("AI_ACTION_PLAN_MODEL", "gpt-4.1-mini")
     today = datetime.date.today().isoformat()
+    knowledge_context = get_ia_assistant_prompt_context()
 
     system_prompt = (
-        "You generate JSON drafts for recursive action plans. "
+        "You generate JSON drafts for AVOCarbon recursive action plans. "
+        "Use this IA Assistant knowledge as authoritative application context: "
+        f"{knowledge_context}\n"
         "Return only valid JSON. The JSON must match this shape: "
         "{version:'1.0', plan_title:string, plan_code:string|null, inserted_by:string, "
         "sujets:[{titre, code, description, sujets, actions}], warnings:[string]}. "
@@ -431,7 +527,8 @@ async def generate_llm_draft_payload(payload: AIActionPlanDraftRequest):
     )
 
     user_prompt = {
-        "prompt": payload.prompt,
+        "business_objective": get_payload_business_objective(payload),
+        "generation_context": payload.generation_context,
         "inserted_by": payload.inserted_by,
         "scope": payload.scope,
         "today": today,
@@ -463,8 +560,11 @@ async def generate_llm_draft_payload(payload: AIActionPlanDraftRequest):
 async def generate_action_plan_draft_service(
     payload: AIActionPlanDraftRequest,
     directory_db,
+    allow_fallback: bool = True,
 ) -> PlanV1:
     fallback_warnings = []
+    llm_payload = None
+    clean_objective = get_payload_business_objective(payload)
 
     try:
         llm_payload = await generate_llm_draft_payload(payload)
@@ -473,32 +573,873 @@ async def generate_action_plan_draft_service(
             llm_payload["version"] = "1.0"
             llm_payload["inserted_by"] = payload.inserted_by
 
-            return normalize_and_validate_plan(PlanV1.model_validate(llm_payload), directory_db)
-    except Exception:
+            plan = sanitize_plan_or_fallback(
+                PlanV1.model_validate(llm_payload),
+                clean_objective,
+                payload.inserted_by,
+            )
+            return normalize_and_validate_plan(plan, directory_db)
+    except Exception as exc:
+        if not allow_fallback:
+            raise HTTPException(
+                status_code=503,
+                detail="IA Assistant is temporarily unavailable.",
+            ) from exc
+
         fallback_warnings.append(
             "AI model draft was unavailable; generated a structured fallback draft."
         )
 
-    plan_title = humanize_prompt(payload.prompt)
-    plan_code = slugify_code(plan_title)
+    if not llm_payload and not allow_fallback:
+        raise HTTPException(
+            status_code=503,
+            detail="IA Assistant is temporarily unavailable.",
+        )
 
-    plan = PlanV1(
-        version="1.0",
-        plan_title=plan_title,
-        plan_code=plan_code,
-        inserted_by=payload.inserted_by,
-        sujets=[
-            SujetNode(
-                titre=plan_title,
-                code=plan_code,
-                description=payload.prompt,
-                sujets=build_default_draft_actions(payload.prompt, payload.inserted_by),
-            )
-        ],
+    plan = build_clean_fallback_plan(
+        clean_objective,
+        payload.inserted_by,
         warnings=fallback_warnings,
     )
 
     return normalize_and_validate_plan(plan, directory_db)
+
+
+def collect_action_nodes_from_sujets(sujets: list[SujetNode]) -> list[ActionNode]:
+    actions: list[ActionNode] = []
+
+    def visit_action(action: ActionNode):
+        actions.append(action)
+
+        for child_action in action.sub_actions:
+            visit_action(child_action)
+
+    def visit_sujet(sujet: SujetNode):
+        for action in sujet.actions:
+            visit_action(action)
+
+        for child_sujet in sujet.sujets:
+            visit_sujet(child_sujet)
+
+    for sujet in sujets:
+        visit_sujet(sujet)
+
+    return actions
+
+
+def collect_sujet_nodes(sujets: list[SujetNode]) -> list[SujetNode]:
+    collected: list[SujetNode] = []
+
+    def visit_sujet(sujet: SujetNode):
+        collected.append(sujet)
+
+        for child_sujet in sujet.sujets:
+            visit_sujet(child_sujet)
+
+    for sujet in sujets:
+        visit_sujet(sujet)
+
+    return collected
+
+
+def get_user_message_texts(messages) -> list[str]:
+    return [message.content.strip() for message in messages if message.role == "user" and message.content.strip()]
+
+
+def clean_problem_statement(message: str | None) -> str | None:
+    normalized = re.sub(r"\s+", " ", str(message or "")).strip(" .")
+
+    if not normalized:
+        return None
+
+    normalized = re.sub(r"^(please\s+)?(create|build|make|generate|prepare|draft)\s+", "", normalized, flags=re.I)
+    normalized = re.sub(
+        r"^(an?\s+)?(urgent\s+|critical\s+|strategic\s+|high\s+priority\s+)?"
+        r"(corrective\s+)?(enterprise\s+)?(action\s+plan|plan)\s*(to|for)?\s*",
+        "",
+        normalized,
+        flags=re.I,
+    ).strip(" .")
+    normalized = re.split(
+        r"\s*,\s*(?:assign|owner|responsible|deadline|due|include|with weekly|urgent|high priority)\b",
+        normalized,
+        maxsplit=1,
+        flags=re.I,
+    )[0].strip(" .")
+
+    if normalized.lower() in {"", "action plan", "plan", "create action plan"}:
+        return None
+
+    return normalized[0].upper() + normalized[1:]
+
+
+def extract_business_objective_from_text(value: str | None) -> str:
+    text = str(value or "")
+    problem_match = re.search(r"\bProblem:\s*([^.;\n]+)", text, flags=re.I)
+
+    if problem_match:
+        objective = re.sub(r"\s+", " ", problem_match.group(1)).strip(" .")
+
+        if objective and not is_prompt_polluted(objective):
+            return objective[0].upper() + objective[1:120]
+
+    for marker in PROMPT_POLLUTION_MARKERS:
+        marker_index = text.find(marker)
+
+        if marker_index > 0:
+            text = text[:marker_index]
+            break
+
+    objective = clean_problem_statement(text) if "clean_problem_statement" in globals() else None
+    objective = objective or humanize_prompt(text)
+
+    if not objective or is_prompt_polluted(objective):
+        return "Action plan"
+
+    return objective[:120].strip(" .")
+
+
+def get_payload_business_objective(payload: AIActionPlanDraftRequest) -> str:
+    return extract_business_objective_from_text(
+        payload.business_objective or payload.prompt
+    )
+
+
+def is_prompt_polluted(value: str | None) -> bool:
+    text = str(value or "")
+
+    if not text:
+        return False
+
+    if any(marker.lower() in text.lower() for marker in PROMPT_POLLUTION_MARKERS):
+        return True
+
+    return bool(
+        re.search(r"\{[^{}]*(application_context|recursive_model)[^{}]*\}", text, flags=re.I | re.S)
+    )
+
+
+def clean_human_text(value: str | None, fallback: str | None = None) -> str | None:
+    if value is None:
+        return fallback
+
+    text = re.sub(r"\s+", " ", str(value)).strip()
+
+    if not text:
+        return fallback
+
+    if not is_prompt_polluted(text):
+        return text
+
+    problem_match = re.search(r"\bProblem:\s*([^.;\n]+)", text, flags=re.I)
+
+    if problem_match:
+        cleaned = re.sub(r"\s+", " ", problem_match.group(1)).strip(" .")
+
+        if cleaned and not is_prompt_polluted(cleaned):
+            return cleaned
+
+    return fallback
+
+
+DEPARTMENT_ALIASES = {
+    "quality": "Quality team",
+    "it": "IT team",
+    "maintenance": "Maintenance team",
+    "production": "Production team",
+    "purchasing": "Purchasing team",
+    "purchase": "Purchasing team",
+    "supply chain": "Supply chain team",
+    "logistics": "Logistics team",
+    "hr": "HR team",
+    "finance": "Finance team",
+    "engineering": "Engineering team",
+}
+
+
+def normalize_responsible_label(value: str | None) -> str | None:
+    normalized = re.sub(r"\s+", " ", str(value or "")).strip(" .,;").lower()
+
+    if not normalized:
+        return None
+
+    if normalized in DEPARTMENT_ALIASES:
+        return DEPARTMENT_ALIASES[normalized]
+
+    if normalized.endswith(" team"):
+        return normalized[0].upper() + normalized[1:]
+
+    return re.sub(r"\s+", " ", str(value or "")).strip(" .,;")
+
+
+def extract_responsible_from_text(text: str) -> str | None:
+    email_match = re.search(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", text)
+
+    if email_match:
+        return email_match.group(0)
+
+    owner_match = re.search(
+        r"\b(?:responsible|owner|owned by|assign(?:ed)?(?: it)? to|belongs to)\s+"
+        r"([A-Za-z][A-Za-z0-9@._' -]{1,60})",
+        text,
+        flags=re.I,
+    )
+
+    if owner_match:
+        return normalize_responsible_label(owner_match.group(1))
+
+    team_match = re.search(r"\b([A-Za-z][A-Za-z0-9&' -]{1,42}\s+team)\b", text, flags=re.I)
+
+    if team_match:
+        return normalize_responsible_label(team_match.group(1))
+
+    if re.search(r"\bmy team\b", text, flags=re.I):
+        return "My team"
+
+    short_department = re.fullmatch(
+        r"\s*(quality|it|maintenance|production|purchasing|purchase|supply chain|logistics|hr|finance|engineering)\s*",
+        text,
+        flags=re.I,
+    )
+
+    if short_department:
+        return normalize_responsible_label(short_department.group(1))
+
+    return None
+
+
+def extract_deadline_from_text(text: str) -> str | None:
+    deadline_match = re.search(
+        r"\b(?:deadline|due date|target date|target|due|by|before)\s+"
+        r"(?:is\s+|should be\s+|for\s+)?([^.,;\n]+)",
+        text,
+        flags=re.I,
+    )
+
+    if deadline_match:
+        return re.sub(r"\s+", " ", deadline_match.group(1)).strip(" .")
+
+    pattern_match = re.search(
+        r"\b(end of [A-Za-z]+|this week|next week|end of month|end of quarter|"
+        r"next month|next quarter|30 days|60 days|90 days|tomorrow|today|as soon as possible|asap)\b",
+        text,
+        flags=re.I,
+    )
+
+    if pattern_match:
+        return pattern_match.group(1)
+
+    return None
+
+
+def extract_urgency_from_text(text: str) -> str | None:
+    if re.search(r"\b(urgent|high priority|critical|asap|as soon as possible)\b", text, flags=re.I):
+        return "Urgent"
+
+    if re.search(r"\b(strategic)\b", text, flags=re.I):
+        return "Strategic"
+
+    if re.search(r"\b(medium priority|normal priority|normal|medium)\b", text, flags=re.I):
+        return "Flexible"
+
+    if re.search(r"\b(low priority|secondary|flexible)\b", text, flags=re.I):
+        return "Flexible"
+
+    return None
+
+
+def extract_sub_action_preference(text: str) -> bool | None:
+    if re.search(r"\b(no sub-actions|no sub actions|keep it simple|simple plan|no recurring)\b", text, flags=re.I):
+        return False
+
+    if re.search(
+        r"\b(sub-actions|sub actions|nested|recursive|detailed|weekly|daily|follow-up|follow up|monitoring)\b",
+        text,
+        flags=re.I,
+    ):
+        return True
+
+    return None
+
+
+def extract_kpi_from_text(text: str, problem: str | None) -> str | None:
+    kpi_match = re.search(
+        r"\b(?:kpi|target|expected result|goal)\s*(?:is|:)?\s*([^.\n;]+)",
+        text,
+        flags=re.I,
+    )
+
+    if kpi_match:
+        return re.sub(r"\s+", " ", kpi_match.group(1)).strip(" .")
+
+    if problem:
+        return f"Progress on: {problem}"
+
+    return None
+
+
+def get_latest_user_message(payload: AssistantChatRequest) -> str | None:
+    user_messages = get_user_message_texts(payload.messages)
+    return user_messages[-1] if user_messages else None
+
+
+def is_affirmative_answer(text: str) -> bool:
+    return bool(re.search(r"\b(yes|yeah|yep|sure|ok|okay|include|add it|do it|please do)\b", text, flags=re.I))
+
+
+def is_negative_answer(text: str) -> bool:
+    return bool(re.search(r"\b(no|nope|not needed|do not|don't|without|skip)\b", text, flags=re.I))
+
+
+def is_generic_answer(text: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+    return normalized in {
+        "yes",
+        "yeah",
+        "yep",
+        "sure",
+        "ok",
+        "okay",
+        "no",
+        "nope",
+        "my team",
+        "team",
+    }
+
+
+def extract_responsible_answer(text: str, allow_plain_text: bool = False) -> str | None:
+    responsible = extract_responsible_from_text(text)
+
+    if responsible:
+        return responsible
+
+    if not allow_plain_text:
+        return None
+
+    normalized = re.sub(r"\s+", " ", text).strip(" .,;")
+
+    if not normalized or is_affirmative_answer(normalized) or is_negative_answer(normalized):
+        return None
+
+    if extract_deadline_from_text(normalized) or extract_urgency_from_text(normalized):
+        return None
+
+    if extract_sub_action_preference(normalized) is not None:
+        return None
+
+    department = normalize_responsible_label(normalized)
+
+    if department:
+        return department
+
+    if len(normalized) <= 80:
+        return normalized
+
+    return None
+
+
+def extract_deadline_answer(text: str, allow_plain_text: bool = False) -> str | None:
+    explicit_deadline = extract_deadline_from_text(text)
+
+    if explicit_deadline:
+        days_match = re.fullmatch(r"(\d+)\s+days?", explicit_deadline.strip(), flags=re.I)
+
+        if days_match:
+            days = int(days_match.group(1))
+            due_date = datetime.date.today() + datetime.timedelta(days=days)
+            return f"{days} days (by {due_date.isoformat()})"
+
+        normalized_deadline = explicit_deadline.strip().lower()
+
+        if normalized_deadline in {"next week"}:
+            due_date = datetime.date.today() + datetime.timedelta(days=7)
+            return f"next week (by {due_date.isoformat()})"
+
+        if normalized_deadline in {"as soon as possible", "asap"}:
+            due_date = datetime.date.today() + datetime.timedelta(days=3)
+            return f"as soon as possible (by {due_date.isoformat()})"
+
+        if normalized_deadline == "next month":
+            today = datetime.date.today()
+            year = today.year + (1 if today.month == 12 else 0)
+            month = 1 if today.month == 12 else today.month + 1
+            return f"next month ({year:04d}-{month:02d})"
+
+        return explicit_deadline
+
+    days_match = re.search(r"\b(\d{1,3})\s+days?\b", text, flags=re.I)
+
+    if days_match:
+        days = int(days_match.group(1))
+        due_date = datetime.date.today() + datetime.timedelta(days=days)
+        return f"{days} days (by {due_date.isoformat()})"
+
+    date_match = re.search(
+        r"\b(\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?|"
+        r"\d{4}-\d{2}-\d{2}|"
+        r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2}|"
+        r"\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*)\b",
+        text,
+        flags=re.I,
+    )
+
+    if date_match:
+        return date_match.group(1)
+
+    next_month_match = re.search(r"\bnext month\b", text, flags=re.I)
+
+    if next_month_match:
+        today = datetime.date.today()
+        year = today.year + (1 if today.month == 12 else 0)
+        month = 1 if today.month == 12 else today.month + 1
+        return f"next month ({year:04d}-{month:02d})"
+
+    if not allow_plain_text:
+        return None
+
+    normalized = re.sub(r"\s+", " ", text).strip(" .,;")
+
+    if not normalized or is_affirmative_answer(normalized) or is_negative_answer(normalized):
+        return None
+
+    if len(normalized) <= 80:
+        return normalized
+
+    return None
+
+
+def extract_subaction_answer(
+    text: str,
+    allow_generic_yes_no: bool = False,
+) -> tuple[bool | None, bool | None, bool | None]:
+    normalized = text.strip()
+    preference = extract_sub_action_preference(normalized)
+    include_monitoring = True if re.search(r"\b(weekly|daily|monitoring|follow-up|follow up|review)\b", normalized, flags=re.I) else None
+    include_escalation = True if re.search(r"\b(escalat\w*|overdue|blocked)\b", normalized, flags=re.I) else None
+
+    if re.search(r"\b(remove|without|no|disable|skip)\b.*\b(monitoring|follow-up|follow up|review)\b", normalized, flags=re.I):
+        include_monitoring = False
+
+    if re.search(r"\b(remove|without|no|disable|skip)\b.*\b(escalat\w*|overdue|blocked)\b", normalized, flags=re.I):
+        include_escalation = False
+
+    if preference is not None:
+        if preference:
+            return True, include_monitoring if include_monitoring is not None else True, include_escalation
+
+        return False, False, False
+
+    if allow_generic_yes_no:
+        if is_affirmative_answer(normalized):
+            return True, True, True
+
+        if is_negative_answer(normalized):
+            return False, False, False
+
+    return None, include_monitoring, include_escalation
+
+
+def normalize_assistant_state(
+    state: AssistantConversationState | None,
+    scope: str,
+) -> AssistantConversationState:
+    if state:
+        data = state.model_dump()
+        data["scope"] = scope
+        return AssistantConversationState.model_validate(data)
+
+    return AssistantConversationState(scope=scope)
+
+
+def advance_assistant_state(state: AssistantConversationState) -> AssistantConversationState:
+    if not state.objective:
+        state.current_step = "objective"
+    elif not state.responsible_team:
+        state.current_step = "responsible_team"
+    elif not state.deadline:
+        state.current_step = "deadline"
+    elif state.include_subactions is None:
+        state.current_step = "subactions"
+    elif not state.urgency:
+        state.current_step = "urgency"
+    else:
+        state.current_step = "ready_to_create"
+
+    return state
+
+
+def update_state_from_message(
+    state: AssistantConversationState,
+    message: str,
+) -> tuple[AssistantConversationState, dict[str, object]]:
+    current_step = state.current_step
+    extracted: dict[str, object] = {}
+    normalized_message = re.sub(r"\s+", " ", message).strip()
+
+    if not normalized_message:
+        return advance_assistant_state(state), extracted
+
+    if current_step == "objective" or current_step == "ready_to_create":
+        objective = clean_problem_statement(normalized_message)
+
+        if objective and (current_step == "objective" or re.search(r"\b(objective|problem|plan|action plan)\b", normalized_message, flags=re.I)):
+            state.objective = objective
+            extracted["objective"] = objective
+
+    responsible = extract_responsible_answer(
+        normalized_message,
+        allow_plain_text=current_step == "responsible_team",
+    )
+
+    if responsible and (current_step in {"responsible_team", "ready_to_create"} or not state.responsible_team):
+        state.responsible_team = responsible
+        extracted["responsible_team"] = responsible
+
+    deadline = extract_deadline_answer(
+        normalized_message,
+        allow_plain_text=current_step == "deadline",
+    )
+
+    if deadline and (current_step in {"deadline", "ready_to_create"} or not state.deadline):
+        state.deadline = deadline
+        extracted["deadline"] = deadline
+
+    include_subactions, include_monitoring, include_escalation = extract_subaction_answer(
+        normalized_message,
+        allow_generic_yes_no=current_step == "subactions",
+    )
+
+    if include_subactions is not None and (
+        current_step in {"subactions", "ready_to_create"} or state.include_subactions is None
+    ):
+        state.include_subactions = include_subactions
+        extracted["include_subactions"] = include_subactions
+
+    if include_monitoring is not None:
+        state.include_monitoring = include_monitoring
+        extracted["include_monitoring"] = include_monitoring
+
+    if include_escalation is not None:
+        state.include_escalation = include_escalation
+        extracted["include_escalation"] = include_escalation
+
+    urgency = extract_urgency_from_text(normalized_message)
+
+    if current_step == "urgency" and not urgency:
+        if re.search(r"\b(high|priority 1|p1)\b", normalized_message, flags=re.I):
+            urgency = "Urgent"
+        elif re.search(r"\b(low|secondary)\b", normalized_message, flags=re.I):
+            urgency = "Flexible"
+        elif re.search(r"\b(normal|standard)\b", normalized_message, flags=re.I):
+            urgency = "Normal"
+
+    if urgency and (current_step in {"urgency", "ready_to_create"} or not state.urgency):
+        state.urgency = urgency
+        extracted["urgency"] = urgency
+
+    return advance_assistant_state(state), extracted
+
+
+def rebuild_state_from_history(payload: AssistantChatRequest) -> AssistantConversationState:
+    state = AssistantConversationState(scope=payload.scope)
+
+    for message in get_user_message_texts(payload.messages):
+        state, _ = update_state_from_message(state, message)
+
+    return state
+
+
+def get_question_for_step(step: str) -> str | None:
+    questions = {
+        "objective": "What problem or objective should this action plan solve?",
+        "responsible_team": "Got it. Which team or responsible person should own this plan?",
+        "deadline": "What deadline should I use for the main actions?",
+        "subactions": "Should I include sub-actions, weekly monitoring, and escalation follow-up?",
+        "urgency": "Is this urgent, high priority, strategic, or a normal priority?",
+    }
+
+    return questions.get(step)
+
+
+def assistant_state_to_slots(state: AssistantConversationState) -> dict[str, object]:
+    return {
+        "problem": state.objective,
+        "responsible": state.responsible_team,
+        "deadline": state.deadline,
+        "urgency": state.urgency,
+        "sub_actions": state.include_subactions,
+        "monitoring": state.include_monitoring,
+        "escalation": state.include_escalation,
+        "kpi": extract_kpi_from_text(state.objective or "", state.objective),
+        "scope": state.scope,
+    }
+
+
+def log_assistant_transition(
+    current_step: str,
+    extracted: dict[str, object],
+    next_state: AssistantConversationState,
+):
+    logger.info(
+        "IA Assistant state transition current_step=%s extracted_fields=%s next_step=%s conversation_state=%s",
+        current_step,
+        extracted,
+        next_state.current_step,
+        next_state.model_dump(),
+    )
+
+
+
+def build_assistant_prompt(
+    slots: dict[str, object],
+    inserted_by: str,
+    conversation_messages=None,
+    conversation_state: AssistantConversationState | None = None,
+    relevant_examples: list[dict] | None = None,
+) -> str:
+    sub_actions = "Yes" if slots.get("sub_actions") else "No"
+    monitoring = "Yes" if slots.get("monitoring") else "No"
+    escalation = "Yes" if slots.get("escalation") else "No"
+    knowledge_context = get_ia_assistant_prompt_context(max_chars=4500)
+    conversation_lines = []
+
+    for message in conversation_messages or []:
+        if message.role in {"user", "assistant"}:
+            conversation_lines.append(f"{message.role}: {message.content}")
+
+    lines = [
+        "Create an enterprise action plan from this IA Assistant conversation.",
+        "Use the AVOCarbon Action Plan knowledge and examples below. Do not expose JSON to the user.",
+        f"Knowledge: {knowledge_context}",
+        f"Current conversation state: {json.dumps(conversation_state.model_dump() if conversation_state else {}, ensure_ascii=True, default=str)}.",
+        f"Conversation history: {json.dumps(conversation_lines[-12:], ensure_ascii=True, default=str)}.",
+        f"Relevant existing action plan patterns: {json.dumps(relevant_examples or [], ensure_ascii=True, default=str)}.",
+        f"Scope: {slots.get('scope') or 'my'}.",
+        f"Problem: {slots.get('problem') or 'Not specified'}.",
+        f"Responsible department/team/person: {slots.get('responsible') or inserted_by}.",
+        f"Deadline: {slots.get('deadline') or 'Not specified'}.",
+        f"Priority/Urgency: {slots.get('urgency') or 'Normal business priority'}.",
+        f"Sub-actions requested: {sub_actions}.",
+        f"Weekly monitoring requested: {monitoring}.",
+        f"Escalation follow-up requested: {escalation}.",
+        f"KPI or expected result: {slots.get('kpi') or 'Define a measurable follow-up KPI'}.",
+        "Create clear topics, nested topics when useful, actions, sub-actions, responsables, due dates, urgency, importance, and escalation fields.",
+    ]
+
+    return "\n".join(lines)
+
+
+def build_assistant_summary(
+    plan: PlanV1,
+    slots: dict[str, object] | None = None,
+) -> AssistantSummary:
+    slots = slots or {}
+    actions = collect_action_nodes_from_sujets(plan.sujets)
+    sujets = collect_sujet_nodes(plan.sujets)
+    due_dates = sorted(str(action.due_date) for action in actions if action.due_date)
+    first_responsible = next(
+        (
+            action.responsable or action.email_responsable
+            for action in actions
+            if action.responsable or action.email_responsable
+        ),
+        None,
+    )
+    first_urgency = next((action.urgency for action in actions if action.urgency), None)
+
+    return AssistantSummary(
+        plan_title=plan.plan_title,
+        topics=[sujet.titre for sujet in sujets[:10]],
+        actions=[action.titre for action in actions[:12]],
+        features=[
+            feature
+            for feature in [
+                "Sub-actions included" if slots.get("sub_actions") else None,
+                "Weekly monitoring" if slots.get("monitoring") else None,
+                "Escalation follow-up" if slots.get("escalation") else None,
+            ]
+            if feature
+        ],
+        actions_count=len(actions),
+        main_responsible=str(slots.get("responsible") or first_responsible or ""),
+        deadline=str(slots.get("deadline") or (due_dates[-1] if due_dates else "")),
+        urgency=str(slots.get("urgency") or first_urgency or "Normal"),
+        sub_actions_included=bool(
+            slots.get("sub_actions") or any(action.sub_actions for action in actions)
+        ),
+    )
+
+
+def get_relevant_action_plan_examples(prompt: str | None, db: Session | None, limit: int = 5) -> list[dict]:
+    if db is None:
+        return []
+
+    try:
+        terms = [
+            term.lower()
+            for term in re.findall(r"[A-Za-z0-9]+", str(prompt or ""))
+            if len(term) >= 4
+        ][:6]
+        query = db.query(Sujet).filter(Sujet.parent_sujet_id.is_(None))
+
+        if terms:
+            query = query.filter(or_(*[Sujet.titre.ilike(f"%{term}%") for term in terms]))
+
+        sujets = query.order_by(Sujet.created_at.desc()).limit(limit).all()
+
+        if not sujets:
+            sujets = (
+                db.query(Sujet)
+                .filter(Sujet.parent_sujet_id.is_(None))
+                .order_by(Sujet.created_at.desc())
+                .limit(limit)
+                .all()
+            )
+
+        examples = []
+
+        for sujet in sujets:
+            actions = (
+                db.query(Action)
+                .filter(Action.sujet_id == sujet.id)
+                .filter(get_action_active_predicate(Action))
+                .order_by(Action.created_at.desc())
+                .limit(8)
+                .all()
+            )
+            examples.append(
+                {
+                    "root_sujet_title": sujet.titre,
+                    "action_titles": [action.titre for action in actions],
+                    "action_types": sorted({action.type for action in actions if action.type}),
+                    "responsible_examples": sorted(
+                        {
+                            action.responsable or action.email_responsable
+                            for action in actions
+                            if action.responsable or action.email_responsable
+                        }
+                    )[:5],
+                    "due_date_patterns": [str(action.due_date) for action in actions if action.due_date][:5],
+                    "priority_patterns": [
+                        {
+                            "importance": action.importance,
+                            "urgency": action.urgency,
+                            "priority_index": action.priority_index,
+                        }
+                        for action in actions[:5]
+                    ],
+                }
+            )
+
+        return examples
+    except Exception as exc:
+        logger.info("IA Assistant relevant examples unavailable: %s", exc)
+        return []
+
+
+async def assistant_chat_service(
+    payload: AssistantChatRequest,
+    db: Session | None,
+    directory_db,
+) -> AssistantChatResponse:
+    latest_message = get_latest_user_message(payload)
+
+    if not latest_message:
+        state = advance_assistant_state(
+            normalize_assistant_state(payload.conversation_state, payload.scope)
+        )
+
+        return AssistantChatResponse(
+            reply=get_question_for_step(state.current_step)
+            or "Tell me what you want to change in this action plan.",
+            state="collecting_info",
+            conversation_state=state,
+            summary=None,
+            draft_id=None,
+            draft=None,
+        )
+
+    if payload.conversation_state:
+        previous_state = normalize_assistant_state(payload.conversation_state, payload.scope)
+        current_step = previous_state.current_step
+        conversation_state, extracted = update_state_from_message(previous_state, latest_message)
+    else:
+        current_step = "objective"
+        conversation_state = rebuild_state_from_history(payload)
+        extracted = conversation_state.model_dump()
+
+    log_assistant_transition(current_step, extracted, conversation_state)
+    question = get_question_for_step(conversation_state.current_step)
+
+    if question:
+        return AssistantChatResponse(
+            reply=question,
+            state="collecting_info",
+            conversation_state=conversation_state,
+            summary=None,
+            draft_id=None,
+            draft=None,
+        )
+
+    slots = assistant_state_to_slots(conversation_state)
+    relevant_examples = get_relevant_action_plan_examples(conversation_state.objective, db)
+
+    try:
+        draft = await generate_action_plan_draft_service(
+            AIActionPlanDraftRequest(
+                prompt=conversation_state.objective or "Action plan",
+                business_objective=conversation_state.objective,
+                generation_context=build_assistant_prompt(
+                    slots,
+                    payload.inserted_by,
+                    conversation_messages=payload.messages,
+                    conversation_state=conversation_state,
+                    relevant_examples=relevant_examples,
+                ),
+                inserted_by=payload.inserted_by,
+                scope=payload.scope,
+            ),
+            directory_db,
+            allow_fallback=True,
+        )
+    except HTTPException as exc:
+        if exc.status_code == 503:
+            return AssistantChatResponse(
+                reply="AI generation failed and fallback generation was not available.",
+                state="error",
+                conversation_state=conversation_state,
+                summary=None,
+                draft_id=None,
+                draft=None,
+            )
+
+        return AssistantChatResponse(
+            reply=f"Draft validation failed: {exc.detail}",
+            state="error",
+            conversation_state=conversation_state,
+            summary=None,
+            draft_id=None,
+            draft=None,
+        )
+    except Exception:
+        logger.exception("IA Assistant draft generation failed after fallback.")
+        return AssistantChatResponse(
+            reply="Draft generation failed after fallback. Please simplify the request and try again.",
+            state="error",
+            conversation_state=conversation_state,
+            summary=None,
+            draft_id=None,
+            draft=None,
+        )
+
+    return AssistantChatResponse(
+        reply="Here is the proposed action plan summary. Do you want me to create it?",
+        state="ready_to_create",
+        conversation_state=conversation_state,
+        summary=build_assistant_summary(draft, slots),
+        draft_id=None,
+        draft=draft,
+    )
 
 
 def ingest_action_recursive(
@@ -596,6 +1537,7 @@ async def create_action_plan_service(
     db: Session,
     directory_db,
 ):
+    plan = sanitize_plan_or_fallback(plan, plan.plan_title, plan.inserted_by)
     plan = normalize_and_validate_plan(plan, directory_db)
     created_sujet_ids: list[int] = []
     created_action_ids: list[int] = []
@@ -629,4 +1571,24 @@ async def create_action_plan_service(
         "total_sujets": len(created_sujet_ids),
         "total_actions": len(created_action_ids),
         "warnings": plan.warnings,
+    }
+
+
+async def assistant_create_service(
+    payload: AssistantCreateRequest,
+    db: Session,
+    directory_db,
+):
+    plan = payload.draft.model_copy(update={"inserted_by": payload.inserted_by})
+    result = await create_action_plan_service(plan, db, directory_db)
+
+    return {
+        "created": True,
+        "root_sujet_id": result.get("root_sujet_id"),
+        "root_sujet_ids": result.get("root_sujet_ids", []),
+        "created_sujet_ids": result.get("created_sujet_ids", []),
+        "created_action_ids": result.get("created_action_ids", []),
+        "plan_title": result.get("plan_title"),
+        "message": "Action plan created successfully.",
+        "warnings": result.get("warnings", []),
     }

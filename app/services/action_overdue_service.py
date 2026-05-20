@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from app.models.action import Action
 from app.models.action_status_comment import ActionStatusComment
 from app.services.action_priority_service import enrich_action_priority
+from app.services.action_status_logic_service import get_action_active_predicate
 
 
 async def update_overdue_actions_service(db: Session):
@@ -11,6 +12,7 @@ async def update_overdue_actions_service(db: Session):
 
     actions = (
         db.query(Action)
+        .filter(get_action_active_predicate(Action))
         .filter(Action.due_date.isnot(None))
         .filter(Action.due_date < today)
         .filter(Action.status.notin_(["closed", "overdue"]))

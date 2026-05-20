@@ -5,6 +5,7 @@ from fastapi import HTTPException
 from app.models.action import Action
 from app.services.email_service import send_email
 from app.services.action_priority_service import enrich_action_priority
+from app.services.action_status_logic_service import get_action_active_predicate
 from app.utils.action_links import build_action_frontend_url
 
 DEMO_ACTION_LINK_RECIPIENT = "olivier.spicker@avocarbon.com"
@@ -108,7 +109,12 @@ async def send_demo_action_link_to_olivier_service(
     db,
     test_email: str | None = None,
 ):
-    action = db.query(Action).filter(Action.id == action_id).first()
+    action = (
+        db.query(Action)
+        .filter(Action.id == action_id)
+        .filter(get_action_active_predicate(Action))
+        .first()
+    )
 
     if not action:
         raise HTTPException(status_code=404, detail="Action not found")
@@ -400,6 +406,7 @@ async def send_due_date_reminders_service(db):
 
     actions = (
         db.query(Action)
+        .filter(get_action_active_predicate(Action))
         .filter(Action.status != "closed")
         .filter(Action.email_responsable.isnot(None))
         .filter(Action.due_date.isnot(None))
@@ -440,6 +447,7 @@ async def send_test_due_date_reminders_service(db, test_email: str):
 
     reminder_actions = (
         db.query(Action)
+        .filter(get_action_active_predicate(Action))
         .filter(Action.status != "closed")
         .filter(Action.email_responsable.isnot(None))
         .filter(Action.due_date.isnot(None))
@@ -458,6 +466,7 @@ async def send_test_due_date_reminders_service(db, test_email: str):
     for responsable_email, highlighted_actions in list(responsables.items())[:3]:
         all_responsable_actions = (
             db.query(Action)
+            .filter(get_action_active_predicate(Action))
             .filter(Action.status != "closed")
             .filter(Action.email_responsable == responsable_email)
             .order_by(Action.priority_index.desc().nullslast(), Action.due_date.asc())
@@ -506,6 +515,7 @@ async def send_grouped_due_date_reminders_service(db):
 
     reminder_actions = (
         db.query(Action)
+        .filter(get_action_active_predicate(Action))
         .filter(Action.status != "closed")
         .filter(Action.email_responsable.isnot(None))
         .filter(Action.due_date.isnot(None))
@@ -528,6 +538,7 @@ async def send_grouped_due_date_reminders_service(db):
     for responsable_email, highlighted_actions in responsables.items():
         all_responsable_actions = (
             db.query(Action)
+            .filter(get_action_active_predicate(Action))
             .filter(Action.status != "closed")
             .filter(Action.email_responsable == responsable_email)
             .order_by(Action.priority_index.desc().nullslast(), Action.due_date.asc())

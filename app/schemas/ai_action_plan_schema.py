@@ -10,6 +10,8 @@ class AIActionPlanDraftRequest(BaseModel):
     prompt: str = Field(..., min_length=1)
     inserted_by: str = Field(..., min_length=1)
     scope: Literal["my", "team"] = "my"
+    business_objective: str | None = None
+    generation_context: str | None = None
 
     @field_validator("prompt", "inserted_by")
     @classmethod
@@ -20,6 +22,15 @@ class AIActionPlanDraftRequest(BaseModel):
             raise ValueError("Value is required")
 
         return normalized
+
+    @field_validator("business_objective", "generation_context")
+    @classmethod
+    def strip_optional_text(cls, value: str | None):
+        if value is None:
+            return None
+
+        normalized = value.strip()
+        return normalized or None
 
 
 class ActionNode(BaseModel):
@@ -86,6 +97,93 @@ class PlanV1(BaseModel):
     @field_validator("plan_title", "inserted_by")
     @classmethod
     def strip_required_text(cls, value: str):
+        normalized = value.strip()
+
+        if not normalized:
+            raise ValueError("Value is required")
+
+        return normalized
+
+class AssistantMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(..., min_length=1)
+
+    @field_validator("content")
+    @classmethod
+    def strip_content(cls, value: str):
+        normalized = value.strip()
+
+        if not normalized:
+            raise ValueError("Message content is required")
+
+        return normalized
+
+
+class AssistantConversationState(BaseModel):
+    objective: str | None = None
+    responsible_team: str | None = None
+    deadline: str | None = None
+    include_subactions: bool | None = None
+    include_monitoring: bool | None = None
+    include_escalation: bool | None = None
+    urgency: str | None = None
+    scope: Literal["my", "team"] = "my"
+    current_step: Literal[
+        "objective",
+        "responsible_team",
+        "deadline",
+        "subactions",
+        "urgency",
+        "ready_to_create",
+    ] = "objective"
+
+
+class AssistantChatRequest(BaseModel):
+    messages: list[AssistantMessage] = Field(default_factory=list)
+    inserted_by: str = Field(..., min_length=1)
+    scope: Literal["my", "team"] = "my"
+    conversation_state: AssistantConversationState | None = None
+
+    @field_validator("inserted_by")
+    @classmethod
+    def strip_inserted_by(cls, value: str):
+        normalized = value.strip()
+
+        if not normalized:
+            raise ValueError("Value is required")
+
+        return normalized
+
+
+class AssistantSummary(BaseModel):
+    plan_title: str | None = None
+    topics: list[str] = Field(default_factory=list)
+    actions: list[str] = Field(default_factory=list)
+    features: list[str] = Field(default_factory=list)
+    actions_count: int = 0
+    main_responsible: str | None = None
+    deadline: str | None = None
+    urgency: str | None = None
+    sub_actions_included: bool = False
+
+
+class AssistantChatResponse(BaseModel):
+    reply: str
+    state: Literal["collecting_info", "ready_to_create", "created", "error"]
+    conversation_state: AssistantConversationState | None = None
+    summary: AssistantSummary | None = None
+    draft_id: str | None = None
+    draft: PlanV1 | None = None
+
+
+class AssistantCreateRequest(BaseModel):
+    draft: PlanV1
+    inserted_by: str = Field(..., min_length=1)
+    scope: Literal["my", "team"] = "my"
+
+    @field_validator("inserted_by")
+    @classmethod
+    def strip_create_inserted_by(cls, value: str):
         normalized = value.strip()
 
         if not normalized:

@@ -18,6 +18,7 @@ from app.services.action_Service import (
     get_my_actions_service,
     get_team_actions_service,
     get_filtered_actions_service,
+    delete_action_service,
     update_action_status_service,
     get_action_status_comments_service,
     mark_action_closed_from_email_service
@@ -43,6 +44,7 @@ from app.services.action_access_service import (
     can_access_action,
     normalize_access_email,
 )
+from app.services.action_status_logic_service import get_action_active_predicate
 from app.services.action_attachment_service import (
     upload_action_attachment_service,
     get_action_attachments_service,
@@ -88,7 +90,12 @@ async def getActionAccess(
             },
         )
 
-    action = db.query(Action).filter(Action.id == action_id).first()
+    action = (
+        db.query(Action)
+        .filter(Action.id == action_id)
+        .filter(get_action_active_predicate(Action))
+        .first()
+    )
 
     if not action:
         return JSONResponse(
@@ -153,6 +160,23 @@ async def updateActionStatus(
         comment=payload.comment,
         created_by=payload.created_by,
     )
+
+
+@router.delete("/actions/{action_id}")
+async def deleteAction(
+    action_id: int,
+    db: Session = Depends(get_db),
+    directory_db: Session = Depends(get_directory_db),
+    current_user: User = Depends(get_current_user),
+):
+    return await delete_action_service(
+        action_id=action_id,
+        db=db,
+        directory_db=directory_db,
+        current_user=current_user,
+    )
+
+
 @router.post("/recalculate-priorities")
 async def recalculatePriorities(
     db: Session = Depends(get_db)

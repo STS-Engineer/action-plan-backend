@@ -13,8 +13,9 @@ from app.services.action_priority_service import (
     calculate_reaction_deadline,
     is_escalation_ready
 )
-from app.services.action_access_service import normalize_access_email
+from app.services.action_access_service import can_access_action, normalize_access_email
 from app.services.action_status_logic_service import (
+    get_action_active_predicate,
     get_action_home_bucket,
     get_action_home_bucket_predicate,
     get_action_overdue_predicate,
@@ -22,6 +23,9 @@ from app.services.action_status_logic_service import (
     normalize_action_status,
     get_normalized_action_status_expression,
 )
+
+
+ACTION_DELETE_FORBIDDEN_MESSAGE = "You can only delete actions you own or manage."
 
 def get_latest_action_history_map(db: Session, action_ids):
     unique_action_ids = list({action_id for action_id in action_ids if action_id is not None})
@@ -272,7 +276,7 @@ async def get_filtered_actions_service(
             Action,
         )
 
-    filters = [status_predicate]
+    filters = [get_action_active_predicate(Action), status_predicate]
 
     if normalized_scope == "team":
         underling_emails = get_team_scope_action_emails(normalized_email, directory_db)
@@ -331,6 +335,7 @@ async def get_actions_by_sujet_id_service(sujet_id: int, db: Session):
     actions = (
         db.query(Action)
         .filter(Action.sujet_id == sujet_id)
+        .filter(get_action_active_predicate(Action))
         .order_by(Action.ordre.asc(), Action.created_at.desc())
         .all()
     )
@@ -360,7 +365,12 @@ async def get_actions_by_sujet_id_service(sujet_id: int, db: Session):
 
 
 async def get_action_by_id_service(action_id: int, db: Session):
-    action = db.query(Action).filter(Action.id == action_id).first()
+    action = (
+        db.query(Action)
+        .filter(Action.id == action_id)
+        .filter(get_action_active_predicate(Action))
+        .first()
+    )
 
     if not action:
         raise HTTPException(status_code=404, detail="Action not found")
@@ -384,6 +394,7 @@ async def get_sous_actions_by_action_id_service(action_id: int, db: Session):
     sous_actions = (
         db.query(Action)
         .filter(Action.parent_action_id == action_id)
+        .filter(get_action_active_predicate(Action))
         .order_by(Action.ordre.asc(), Action.created_at.desc())
         .all()
     )
@@ -420,7 +431,7 @@ async def get_statistiques_service(db: Session):
                 func.distinct(case((Action.status == "blocked", Action.id)))
             ).label("actions_blocked"),
         )
-        .outerjoin(Action, Sujet.id == Action.sujet_id)
+        .outerjoin(Action, and_(Sujet.id == Action.sujet_id, get_action_active_predicate(Action)))
         .one()
     )
 
@@ -438,6 +449,7 @@ async def get_emails_service(db: Session):
     emails = (
         db.query(Action.email_responsable)
         .filter(Action.email_responsable != None)
+        .filter(get_action_active_predicate(Action))
         .distinct()
         .all()
     )
@@ -452,7 +464,12 @@ async def update_action_status_service(
     comment: str | None = None,
     created_by: str | None = None,
 ):
-    action = db.query(Action).filter(Action.id == action_id).first()
+    action = (
+        db.query(Action)
+        .filter(Action.id == action_id)
+        .filter(get_action_active_predicate(Action))
+        .first()
+    )
 
     if not action:
         return {"error": "Action not found"}
@@ -511,6 +528,7 @@ async def get_my_actions_service(email: str, db: Session):
     actions = (
         db.query(Action)
         .filter(func.lower(func.coalesce(Action.email_responsable, "")) == normalized_email)
+        .filter(get_action_active_predicate(Action))
         .order_by(
             Action.priority_index.desc().nullslast(),
             Action.due_date.asc().nullslast(),
@@ -561,6 +579,7 @@ async def get_team_actions_service(email: str, db: Session, directory_db):
     actions = (
         db.query(Action)
         .filter(func.lower(func.coalesce(Action.email_responsable, "")).in_(underling_emails))
+        .filter(get_action_active_predicate(Action))
         .order_by(
             Action.priority_index.desc().nullslast(),
             Action.due_date.asc().nullslast(),
@@ -583,8 +602,124 @@ async def get_team_actions_service(email: str, db: Session, directory_db):
             for action in actions
         ],
     }
+
+
+def _collect_active_action_subtree_ids(action_id: int, db: Session) -> list[int]:
+    collected_ids: list[int] = []
+    seen_ids: set[int] = set()
+    pending_ids = [action_id]
+
+    while pending_ids:
+        current_ids = [
+            pending_id
+            for pending_id in pending_ids
+            if pending_id not in seen_ids
+        ]
+
+        if not current_ids:
+            break
+
+        actions = (
+            db.query(Action.id)
+            .filter(Action.id.in_(current_ids))
+            .filter(get_action_active_predicate(Action))
+            .all()
+        )
+        active_ids = [action.id for action in actions]
+
+        for active_id in active_ids:
+            seen_ids.add(active_id)
+            collected_ids.append(active_id)
+
+        child_rows = (
+            db.query(Action.id)
+            .filter(Action.parent_action_id.in_(active_ids))
+            .filter(get_action_active_predicate(Action))
+            .all()
+            if active_ids
+            else []
+        )
+        pending_ids = [
+            child.id
+            for child in child_rows
+            if child.id not in seen_ids
+        ]
+
+    return collected_ids
+
+
+async def delete_action_service(
+    action_id: int,
+    db: Session,
+    directory_db,
+    current_user,
+):
+    logged_email = normalize_access_email(getattr(current_user, "email", None))
+
+    action = (
+        db.query(Action)
+        .filter(Action.id == action_id)
+        .filter(get_action_active_predicate(Action))
+        .first()
+    )
+
+    if not action:
+        raise HTTPException(status_code=404, detail="Action not found")
+
+    access = can_access_action(
+        logged_email,
+        action,
+        directory_db,
+        user_role=getattr(current_user, "role", None),
+    )
+
+    if not access["allowed"]:
+        raise HTTPException(status_code=403, detail=ACTION_DELETE_FORBIDDEN_MESSAGE)
+
+    subtree_ids = _collect_active_action_subtree_ids(action.id, db)
+    now = datetime.datetime.now(datetime.timezone.utc)
+
+    actions = (
+        db.query(Action)
+        .filter(Action.id.in_(subtree_ids))
+        .filter(get_action_active_predicate(Action))
+        .all()
+    )
+
+    for subtree_action in actions:
+        subtree_action.is_deleted = True
+        subtree_action.deleted_at = now
+        subtree_action.deleted_by = logged_email
+        subtree_action.updated_at = now
+
+        log_action_event(
+            db=db,
+            action_id=subtree_action.id,
+            event_type="action_archived",
+            old_value="active",
+            new_value="deleted",
+            details=f"Action deleted/archived by {logged_email}",
+            created_by=logged_email,
+        )
+
+    db.commit()
+
+    return {
+        "deleted": True,
+        "action_id": action_id,
+        "deleted_action_ids": subtree_ids,
+        "count": len(subtree_ids),
+        "message": "Action deleted.",
+    }
+
+
 async def mark_action_closed_from_email_service(action_id: int, db):
-    action = db.query(Action).filter(Action.id == action_id).first()
+    action = (
+        db.query(Action)
+        .filter(Action.id == action_id)
+        .filter(get_action_active_predicate(Action))
+        .first()
+    )
 
     if not action:
         return """

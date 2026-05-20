@@ -4,6 +4,7 @@ from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session, aliased
 
 from app.services.action_status_logic_service import (
+    get_action_active_predicate,
     get_action_closed_visible_predicate,
     get_action_home_bucket_predicate,
     get_action_in_progress_predicate,
@@ -93,6 +94,7 @@ def build_visible_scoped_actions_subquery(
             Action.status.label("status"),
             Action.due_date.label("due_date"),
             Action.closed_date.label("closed_date"),
+            Action.is_deleted.label("is_deleted"),
         )
         .select_from(sujet_tree)
         .join(Action, Action.sujet_id == sujet_tree.c.sujet_id)
@@ -216,7 +218,7 @@ async def getSujetsService(db: Session):
                 )
             ).label("overdue_actions"),
         )
-        .outerjoin(Action, Sujet.id == Action.sujet_id)
+        .outerjoin(Action, (Sujet.id == Action.sujet_id) & get_action_active_predicate(Action))
         .group_by(Sujet.id)
         .order_by(Sujet.created_at.desc())
         .all()

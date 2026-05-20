@@ -1,6 +1,6 @@
 import datetime
 from app.config.database import Base
-from sqlalchemy import BigInteger, Date, ForeignKey, Column, Text, DateTime, func, Integer, FetchedValue
+from sqlalchemy import BigInteger, Boolean, Date, ForeignKey, Column, Text, DateTime, func, Integer, FetchedValue, text
 from sqlalchemy.orm import relationship
 
 class Action(Base):
@@ -27,6 +27,9 @@ class Action(Base):
     priority_index = Column(Integer, nullable=True)
     last_reminder_sent_at = Column(DateTime(timezone=True), nullable=True)
     ordre = Column(Integer, nullable=True)
+    is_deleted = Column(Boolean, nullable=False, default=False, server_default=text("false"))
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+    deleted_by = Column(Text, nullable=True)
     depth = Column(
         Integer,
         nullable=True,

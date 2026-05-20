@@ -3,6 +3,7 @@ from app.models.action import Action
 from app.services.action_Service import action_to_dict, get_latest_action_history_map
 from app.models.sujet import Sujet
 from app.services.action_access_service import normalize_access_email
+from app.services.action_status_logic_service import get_action_active_predicate
 from app.services.directory_service import get_all_underlings
 
 
@@ -41,6 +42,7 @@ async def search_actions_service(
         return []
 
     filters = [
+        get_action_active_predicate(Action),
         or_(
             Action.titre.ilike(search),
             Action.description.ilike(search),

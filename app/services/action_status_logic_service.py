@@ -1,6 +1,6 @@
 import datetime
 
-from sqlalchemy import and_, func, or_
+from sqlalchemy import and_, func, or_, true
 
 from app.models.action import Action
 
@@ -17,6 +17,9 @@ def normalize_action_status(status: str | None) -> str:
 
 
 def is_action_hidden_from_home(action, today: datetime.date | None = None) -> bool:
+    if bool(getattr(action, "is_deleted", False)):
+        return True
+
     today = today or datetime.date.today()
     status = normalize_action_status(getattr(action, "status", None))
     closed_date = getattr(action, "closed_date", None)
@@ -57,6 +60,15 @@ def _get_action_column(action_like, column_name: str):
     raise AttributeError(f"Column '{column_name}' not found on action_like")
 
 
+def get_action_active_predicate(action_like=Action):
+    try:
+        is_deleted_col = _get_action_column(action_like, "is_deleted")
+    except AttributeError:
+        return true()
+
+    return or_(is_deleted_col.is_(False), is_deleted_col.is_(None))
+
+
 def get_normalized_action_status_expression(action_like=Action):
     status_col = _get_action_column(action_like, "status")
     return func.lower(func.coalesce(status_col, ""))
@@ -74,7 +86,10 @@ def get_action_hidden_from_home_predicate(action_like=Action):
 
 
 def get_action_visible_from_home_predicate(action_like=Action):
-    return ~get_action_hidden_from_home_predicate(action_like)
+    return and_(
+        get_action_active_predicate(action_like),
+        ~get_action_hidden_from_home_predicate(action_like),
+    )
 
 
 def get_action_closed_visible_predicate(action_like=Action):

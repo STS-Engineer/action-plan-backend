@@ -16,6 +16,7 @@ from app.services.azure_blob_service import (
     upload_action_attachment_blob,
 )
 from app.services.action_access_service import can_access_action
+from app.services.action_status_logic_service import get_action_active_predicate
 from app.services.action_attachment_security_service import (
     assert_path_under_upload_root,
     sanitize_original_filename,
@@ -59,7 +60,12 @@ async def upload_action_attachment_service(
     directory_db=None,
     current_user=None,
 ):
-    action = db.query(Action).filter(Action.id == action_id).first()
+    action = (
+        db.query(Action)
+        .filter(Action.id == action_id)
+        .filter(get_action_active_predicate(Action))
+        .first()
+    )
 
     if not action:
         raise HTTPException(status_code=404, detail="Action not found")
@@ -81,7 +87,10 @@ async def upload_action_attachment_service(
     )
 
     if not authorized:
-        raise HTTPException(status_code=403, detail="Forbidden")
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have permission to access this attachment.",
+        )
 
     validation = validate_attachment_file(file)
     original_filename = sanitize_original_filename(validation["file_name"])
@@ -146,6 +155,16 @@ async def upload_action_attachment_service(
 
 
 async def get_action_attachments_service(action_id: int, db: Session):
+    action = (
+        db.query(Action.id)
+        .filter(Action.id == action_id)
+        .filter(get_action_active_predicate(Action))
+        .first()
+    )
+
+    if not action:
+        return []
+
     attachments = (
         db.query(ActionAttachment)
         .filter(ActionAttachment.action_id == action_id)
@@ -179,13 +198,18 @@ async def download_action_attachment_service(
     )
 
     if not attachment:
-        raise HTTPException(status_code=404, detail="Attachment not found")
+        raise HTTPException(status_code=404, detail=ATTACHMENT_FILE_NOT_FOUND_MESSAGE)
 
-    action = db.query(Action).filter(Action.id == attachment.action_id).first()
+    action = (
+        db.query(Action)
+        .filter(Action.id == attachment.action_id)
+        .filter(get_action_active_predicate(Action))
+        .first()
+    )
     resolved_action_id = action.id if action else None
 
     if not action:
-        raise HTTPException(status_code=404, detail="Attachment not found")
+        raise HTTPException(status_code=404, detail=ATTACHMENT_FILE_NOT_FOUND_MESSAGE)
 
     access = can_access_action(
         logged_user_email,
@@ -211,7 +235,10 @@ async def download_action_attachment_service(
     )
 
     if not authorized:
-        raise HTTPException(status_code=403, detail="Forbidden")
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have permission to access this attachment.",
+        )
 
     if not is_legacy_local_attachment_path(attachment.file_path):
         exists = blob_exists(attachment.file_path)
@@ -238,7 +265,7 @@ async def download_action_attachment_service(
     except HTTPException as exc:
         raise HTTPException(
             status_code=404,
-            detail="Legacy local attachment not available",
+            detail=ATTACHMENT_FILE_NOT_FOUND_MESSAGE,
         ) from exc
 
     if not os.path.isfile(file_path):
@@ -250,7 +277,7 @@ async def download_action_attachment_service(
         )
         raise HTTPException(
             status_code=404,
-            detail="Legacy local attachment not available",
+            detail=ATTACHMENT_FILE_NOT_FOUND_MESSAGE,
         )
 
     logger.debug(

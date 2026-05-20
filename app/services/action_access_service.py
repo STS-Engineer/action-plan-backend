@@ -35,6 +35,13 @@ def can_access_action(
     requester_email = normalize_access_email(getattr(action, "email_demandeur", None))
     created_by_email = normalize_access_email(created_by_email)
 
+    if bool(getattr(action, "is_deleted", False)):
+        return {
+            "allowed": False,
+            "scope": None,
+            "reason": "action_deleted",
+        }
+
     if not logged_email:
         return {
             "allowed": False,
