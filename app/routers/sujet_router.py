@@ -22,7 +22,7 @@ async def health_check():
 @router.get("/home-summary")
 async def getHomeSummary(
     email: str,
-    scope: Literal["my", "team"] = "my",
+    scope: Literal["my", "team", "requested_by_me"] = "my",
     db: Session = Depends(get_db),
     directory_db: Session = Depends(get_directory_db),
 ):
@@ -51,15 +51,28 @@ async def getSujetsRacine(
     db: Session = Depends(get_db),
     email: str | None = None,
     status: str | None = None,
+    scope: Literal["my", "team", "requested_by_me"] = "my",
+    directory_db: Session = Depends(get_directory_db),
 ):
-    return await getSujetsRacineService(db, email, status)
+    return await getSujetsRacineService(db, email, status, scope, directory_db)
 
 @router.get("/sujets/{sujet_id}/sous-sujets")
 async def getSousSujetsBySujetId(
     sujet_id: int,
-    db: Session = Depends(get_db)
+    email: str | None = None,
+    status: str | None = None,
+    scope: Literal["my", "team", "requested_by_me"] | None = None,
+    db: Session = Depends(get_db),
+    directory_db: Session = Depends(get_directory_db),
 ):
-    return await get_sous_sujets_by_sujet_id_service(sujet_id, db)
+    return await get_sous_sujets_by_sujet_id_service(
+        sujet_id=sujet_id,
+        db=db,
+        email=email,
+        scope=scope,
+        directory_db=directory_db,
+        status=status,
+    )
 @router.get("/team-sujets-racine")
 async def getTeamSujetsRacine(
     email: str,

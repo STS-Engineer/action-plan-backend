@@ -9,6 +9,7 @@ HIDDEN_CLOSED_DAYS = 7
 CLOSED_HOME_BUCKET = "closed"
 OVERDUE_HOME_BUCKET = "overdue"
 IN_PROGRESS_HOME_BUCKET = "in_progress"
+BLOCKED_HOME_BUCKET = "blocked"
 OVERDUE_STATUSES = {"overdue", "late"}
 
 
@@ -123,8 +124,17 @@ def get_action_in_progress_predicate(action_like=Action):
 
     return and_(
         get_action_visible_from_home_predicate(action_like),
-        status_expr.in_(["open", "blocked"]),
+        status_expr.in_(["open", BLOCKED_HOME_BUCKET]),
         ~get_action_overdue_predicate(action_like),
+    )
+
+
+def get_action_blocked_predicate(action_like=Action):
+    status_expr = get_normalized_action_status_expression(action_like)
+
+    return and_(
+        get_action_visible_from_home_predicate(action_like),
+        status_expr == BLOCKED_HOME_BUCKET,
     )
 
 

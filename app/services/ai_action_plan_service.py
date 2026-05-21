@@ -20,6 +20,7 @@ from app.schemas.ai_action_plan_schema import (
     AssistantChatResponse,
     AssistantCreateRequest,
     AssistantSummary,
+    AssistantResponsibleCandidate,
     PlanV1,
     SujetNode,
 )
@@ -29,6 +30,9 @@ from app.services.directory_service import get_member_by_email, normalize_email
 from app.services.ia_assistant_knowledge_service import (
     get_ia_assistant_knowledge,
     get_ia_assistant_prompt_context,
+)
+from app.services.ia_responsible_resolver_service import (
+    resolve_responsible_query,
 )
 
 
@@ -189,21 +193,27 @@ def resolve_responsable(
     warnings: list[str],
 ):
     explicit_email = normalize_optional_email(action.email_responsable)
-    member = None
+    explicit_responsible = clean_human_text(action.responsable)
 
     if explicit_email:
-        member = get_member_by_email(directory_db, explicit_email)
+        resolution = resolve_responsible_query(explicit_email, directory_db)
+    elif explicit_responsible:
+        resolution = resolve_responsible_query(explicit_responsible, directory_db)
+    else:
+        resolution = resolve_responsible_query(inserted_by, directory_db)
 
-    if not member and action.responsable:
-        member = find_member_by_name(directory_db, action.responsable)
+    if resolution.get("type") == "person" and resolution.get("email"):
+        action.email_responsable = normalize_optional_email(resolution.get("email"))
+        action.responsable = resolution.get("display_name") or action.responsable or action.email_responsable
+        return
 
-    if not member:
-        inserted_by_email = normalize_optional_email(inserted_by)
-        member = get_member_by_email(directory_db, inserted_by_email) if inserted_by_email else None
-
-    if member and member.email:
-        action.email_responsable = normalize_optional_email(member.email)
-        action.responsable = member.display_name or action.responsable or action.email_responsable
+    if explicit_email or explicit_responsible:
+        warning = (
+            f"Could not confidently match responsable '{explicit_responsible or explicit_email}' "
+            f"for action '{action.titre}'. email_responsable left empty."
+        )
+        action.warnings.append(warning)
+        warnings.append(warning)
         return
 
     if not action.email_responsable:
@@ -330,9 +340,15 @@ def normalize_and_validate_plan(plan: PlanV1, directory_db) -> PlanV1:
     return plan
 
 
-def build_default_draft_actions(prompt: str, inserted_by: str):
+def build_default_draft_actions(
+    prompt: str,
+    inserted_by: str,
+    responsible_name: str | None = None,
+    responsible_email: str | None = None,
+):
     today = datetime.date.today()
     topic = humanize_prompt(prompt)
+    action_responsible = responsible_name or inserted_by
 
     return [
         SujetNode(
@@ -342,7 +358,8 @@ def build_default_draft_actions(prompt: str, inserted_by: str):
                 ActionNode(
                     titre="Confirm issue scope and current impact",
                     description="List affected areas, owners, current status, impact, and immediate risks.",
-                    responsable=inserted_by,
+                    responsable=action_responsible,
+                    email_responsable=responsible_email,
                     due_date=today + datetime.timedelta(days=3),
                     importance="haute",
                     urgency="Urgent",
@@ -350,7 +367,8 @@ def build_default_draft_actions(prompt: str, inserted_by: str):
                         ActionNode(
                             titre="Build the working issue list",
                             description="Create one shared list with item, owner, due date, blocker, and latest update.",
-                            responsable=inserted_by,
+                            responsable=action_responsible,
+                            email_responsable=responsible_email,
                             due_date=today + datetime.timedelta(days=2),
                             importance="moyenne",
                             urgency="Urgent",
@@ -360,7 +378,8 @@ def build_default_draft_actions(prompt: str, inserted_by: str):
                 ActionNode(
                     titre="Identify main root causes",
                     description="Group causes by process, people, material, method, system, and escalation needs.",
-                    responsable=inserted_by,
+                    responsable=action_responsible,
+                    email_responsable=responsible_email,
                     due_date=today + datetime.timedelta(days=5),
                     importance="moyenne",
                     urgency="Flexible",
@@ -374,7 +393,8 @@ def build_default_draft_actions(prompt: str, inserted_by: str):
                 ActionNode(
                     titre="Define corrective action owners and due dates",
                     description="Assign clear owners, dates, and expected deliverables for each major corrective action.",
-                    responsable=inserted_by,
+                    responsable=action_responsible,
+                    email_responsable=responsible_email,
                     due_date=today + datetime.timedelta(days=7),
                     importance="haute",
                     urgency="Flexible",
@@ -382,13 +402,15 @@ def build_default_draft_actions(prompt: str, inserted_by: str):
                         ActionNode(
                             titre="Confirm owner commitment",
                             description="Review ownership, blockers, and realistic completion date with each owner.",
-                            responsable=inserted_by,
+                            responsable=action_responsible,
+                            email_responsable=responsible_email,
                             due_date=today + datetime.timedelta(days=4),
                         ),
                         ActionNode(
                             titre="Track corrective action progress",
                             description="Update progress, blockers, and next decisions before each review.",
-                            responsable=inserted_by,
+                            responsable=action_responsible,
+                            email_responsable=responsible_email,
                             due_date=today + datetime.timedelta(days=10),
                         ),
                     ],
@@ -396,7 +418,8 @@ def build_default_draft_actions(prompt: str, inserted_by: str):
                 ActionNode(
                     titre="Escalate blocked actions",
                     description="Escalate items that need management support, cross-functional decisions, or priority arbitration.",
-                    responsable=inserted_by,
+                    responsable=action_responsible,
+                    email_responsable=responsible_email,
                     due_date=today + datetime.timedelta(days=8),
                     importance="haute",
                     urgency="Urgent",
@@ -410,7 +433,8 @@ def build_default_draft_actions(prompt: str, inserted_by: str):
                 ActionNode(
                     titre="Create weekly progress review",
                     description="Review action progress, overdue items, blockers, and expected results every week.",
-                    responsable=inserted_by,
+                    responsable=action_responsible,
+                    email_responsable=responsible_email,
                     due_date=today + datetime.timedelta(days=14),
                     importance="moyenne",
                     urgency="Secondaire",
@@ -418,7 +442,8 @@ def build_default_draft_actions(prompt: str, inserted_by: str):
                 ActionNode(
                     titre="Define prevention and early warning triggers",
                     description="Set triggers for repeated delays, missed commitments, blocked owners, and overdue actions.",
-                    responsable=inserted_by,
+                    responsable=action_responsible,
+                    email_responsable=responsible_email,
                     due_date=today + datetime.timedelta(days=21),
                     importance="moyenne",
                     urgency="Secondaire",
@@ -431,6 +456,8 @@ def build_default_draft_actions(prompt: str, inserted_by: str):
 def build_clean_fallback_plan(
     objective: str,
     inserted_by: str,
+    responsible_name: str | None = None,
+    responsible_email: str | None = None,
     warnings: list[str] | None = None,
 ) -> PlanV1:
     clean_objective = extract_business_objective_from_text(objective)
@@ -446,7 +473,12 @@ def build_clean_fallback_plan(
                 titre=clean_objective,
                 code=plan_code,
                 description=f"Action plan for: {clean_objective}.",
-                sujets=build_default_draft_actions(clean_objective, inserted_by),
+                sujets=build_default_draft_actions(
+                    clean_objective,
+                    inserted_by,
+                    responsible_name=responsible_name,
+                    responsible_email=responsible_email,
+                ),
             )
         ],
         warnings=warnings or [],
@@ -481,7 +513,13 @@ def plan_contains_prompt_pollution(plan: PlanV1) -> bool:
     return any(is_prompt_polluted(value) for value in values if value)
 
 
-def sanitize_plan_or_fallback(plan: PlanV1, objective: str, inserted_by: str) -> PlanV1:
+def sanitize_plan_or_fallback(
+    plan: PlanV1,
+    objective: str,
+    inserted_by: str,
+    responsible_name: str | None = None,
+    responsible_email: str | None = None,
+) -> PlanV1:
     clean_objective = extract_business_objective_from_text(objective or plan.plan_title)
 
     if not plan_contains_prompt_pollution(plan):
@@ -496,7 +534,44 @@ def sanitize_plan_or_fallback(plan: PlanV1, objective: str, inserted_by: str) ->
 
     warnings = list(plan.warnings or [])
     warnings.append("Internal prompt text was removed; generated a clean fallback plan.")
-    return build_clean_fallback_plan(clean_objective, inserted_by, warnings=list(dict.fromkeys(warnings)))
+    return build_clean_fallback_plan(
+        clean_objective,
+        inserted_by,
+        responsible_name=responsible_name,
+        responsible_email=responsible_email,
+        warnings=list(dict.fromkeys(warnings)),
+    )
+
+
+def apply_resolved_responsible_to_plan(
+    plan: PlanV1,
+    responsible_name: str | None,
+    responsible_email: str | None,
+) -> PlanV1:
+    if not responsible_name and not responsible_email:
+        return plan
+
+    resolved_name = responsible_name or responsible_email
+    resolved_email = normalize_optional_email(responsible_email)
+
+    def visit_action(action: ActionNode):
+        action.responsable = resolved_name
+        action.email_responsable = resolved_email
+
+        for child_action in action.sub_actions:
+            visit_action(child_action)
+
+    def visit_sujet(sujet: SujetNode):
+        for action in sujet.actions:
+            visit_action(action)
+
+        for child_sujet in sujet.sujets:
+            visit_sujet(child_sujet)
+
+    for sujet in plan.sujets:
+        visit_sujet(sujet)
+
+    return plan
 
 
 async def generate_llm_draft_payload(payload: AIActionPlanDraftRequest):
@@ -577,6 +652,13 @@ async def generate_action_plan_draft_service(
                 PlanV1.model_validate(llm_payload),
                 clean_objective,
                 payload.inserted_by,
+                responsible_name=payload.responsible_display_name,
+                responsible_email=payload.responsible_email,
+            )
+            apply_resolved_responsible_to_plan(
+                plan,
+                payload.responsible_display_name,
+                payload.responsible_email,
             )
             return normalize_and_validate_plan(plan, directory_db)
     except Exception as exc:
@@ -599,6 +681,8 @@ async def generate_action_plan_draft_service(
     plan = build_clean_fallback_plan(
         clean_objective,
         payload.inserted_by,
+        responsible_name=payload.responsible_display_name,
+        responsible_email=payload.responsible_email,
         warnings=fallback_warnings,
     )
 
@@ -661,7 +745,7 @@ def clean_problem_statement(message: str | None) -> str | None:
         flags=re.I,
     ).strip(" .")
     normalized = re.split(
-        r"\s*,\s*(?:assign|owner|responsible|deadline|due|include|with weekly|urgent|high priority)\b",
+        r"(?:\s*,\s*|\s+and\s+)(?:assign|owner|responsible|deadline|due|include|with weekly|urgent|high priority)\b",
         normalized,
         maxsplit=1,
         flags=re.I,
@@ -779,14 +863,20 @@ def extract_responsible_from_text(text: str) -> str | None:
         return email_match.group(0)
 
     owner_match = re.search(
-        r"\b(?:responsible|owner|owned by|assign(?:ed)?(?: it)? to|belongs to)\s+"
-        r"([A-Za-z][A-Za-z0-9@._' -]{1,60})",
+        r"\b(?:responsible|owner|owned by|assign(?:ed)?(?: it| this)? to|belongs to)\s+"
+        r"([^\n,.;]{2,80})",
         text,
         flags=re.I,
     )
 
     if owner_match:
-        return normalize_responsible_label(owner_match.group(1))
+        owner_text = re.split(
+            r"\b(?:and|with|deadline|due|include|urgent|priority|by|before)\b|[,.;\n]",
+            owner_match.group(1),
+            maxsplit=1,
+            flags=re.I,
+        )[0]
+        return normalize_responsible_label(owner_text)
 
     team_match = re.search(r"\b([A-Za-z][A-Za-z0-9&' -]{1,42}\s+team)\b", text, flags=re.I)
 
@@ -1056,6 +1146,10 @@ def advance_assistant_state(state: AssistantConversationState) -> AssistantConve
         state.current_step = "objective"
     elif not state.responsible_team:
         state.current_step = "responsible_team"
+    elif state.responsible_needs_confirmation or (
+        state.responsible_type in {"team", "unknown"} and not state.responsible_email
+    ):
+        state.current_step = "responsible_confirmation"
     elif not state.deadline:
         state.current_step = "deadline"
     elif state.include_subactions is None:
@@ -1066,6 +1160,147 @@ def advance_assistant_state(state: AssistantConversationState) -> AssistantConve
         state.current_step = "ready_to_create"
 
     return state
+
+
+def candidate_dicts(candidates: list[dict] | None) -> list[AssistantResponsibleCandidate]:
+    normalized_candidates = []
+    seen = set()
+
+    for candidate in candidates or []:
+        email = normalize_optional_email(candidate.get("email"))
+        display_name = candidate.get("display_name") or email
+        key = email or display_name
+
+        if not key or key in seen:
+            continue
+
+        seen.add(key)
+        normalized_candidates.append(
+            AssistantResponsibleCandidate(
+                type=candidate.get("type") or "person",
+                display_name=display_name,
+                email=email,
+                department=candidate.get("department"),
+                job_title=candidate.get("job_title"),
+                site=candidate.get("site"),
+                confidence=float(candidate.get("confidence") or 0),
+                reason=candidate.get("reason"),
+            )
+        )
+
+    return normalized_candidates[:6]
+
+
+def clear_responsible_resolution(state: AssistantConversationState) -> AssistantConversationState:
+    state.responsible_team = None
+    state.responsible_type = None
+    state.responsible_display_name = None
+    state.responsible_email = None
+    state.responsible_department = None
+    state.responsible_confidence = None
+    state.responsible_candidates = []
+    state.pending_responsible_query = None
+    state.responsible_needs_confirmation = False
+    return state
+
+
+def apply_responsible_resolution(
+    state: AssistantConversationState,
+    resolution: dict,
+    query: str,
+) -> AssistantConversationState:
+    resolution_type = resolution.get("type") or "unknown"
+    candidates = candidate_dicts(resolution.get("candidates"))
+    confidence = float(resolution.get("confidence") or 0)
+
+    state.responsible_type = resolution_type
+    state.responsible_confidence = confidence
+    state.responsible_candidates = candidates
+    state.pending_responsible_query = query
+    state.responsible_department = resolution.get("department")
+
+    if resolution_type == "person" and resolution.get("email") and not resolution.get("needs_confirmation"):
+        state.responsible_display_name = resolution.get("display_name")
+        state.responsible_email = normalize_optional_email(resolution.get("email"))
+        state.responsible_team = state.responsible_display_name or state.responsible_email
+        state.responsible_department = resolution.get("department")
+        state.responsible_candidates = []
+        state.pending_responsible_query = None
+        state.responsible_needs_confirmation = False
+        return advance_assistant_state(state)
+
+    state.responsible_display_name = resolution.get("display_name") or query
+    state.responsible_team = state.responsible_display_name
+    state.responsible_email = None
+    state.responsible_needs_confirmation = True
+    state.current_step = "responsible_confirmation"
+    return state
+
+
+def resolve_state_responsible(
+    state: AssistantConversationState,
+    message: str,
+    extracted: dict[str, object],
+    inserted_by: str,
+    directory_db,
+) -> AssistantConversationState:
+    if re.search(r"\bnone of these\b", message, flags=re.I):
+        clear_responsible_resolution(state)
+        state.current_step = "responsible_team"
+        return state
+
+    query = None
+
+    if extracted.get("responsible_team"):
+        query = str(extracted["responsible_team"])
+    elif state.current_step == "responsible_confirmation":
+        query = extract_responsible_answer(message, allow_plain_text=True) or message
+    elif state.responsible_team and not state.responsible_email and state.responsible_type != "person":
+        query = state.responsible_team
+
+    if not query:
+        return advance_assistant_state(state)
+
+    resolution = resolve_responsible_query(
+        query=query,
+        directory_db=directory_db,
+        logged_user_email=inserted_by,
+    )
+
+    logger.info(
+        "IA Assistant responsible resolution query=%s type=%s confidence=%s email=%s candidates=%s",
+        query,
+        resolution.get("type"),
+        resolution.get("confidence"),
+        resolution.get("email"),
+        len(resolution.get("candidates") or []),
+    )
+
+    return apply_responsible_resolution(state, resolution, query)
+
+
+def build_responsible_confirmation_reply(state: AssistantConversationState) -> str:
+    candidates = state.responsible_candidates or []
+
+    if state.responsible_type == "team":
+        if candidates:
+            return (
+                f"I found {state.responsible_display_name or state.responsible_team}. "
+                "Which person should own the actions?"
+            )
+
+        return (
+            f"I understood {state.responsible_display_name or state.responsible_team}, "
+            "but I need a specific owner before I create actions. Who should own it?"
+        )
+
+    if candidates:
+        return "I found several possible matches. Which one do you mean?"
+
+    return (
+        f"I could not confidently find '{state.pending_responsible_query or state.responsible_team}' "
+        "in the company directory. Please enter the responsible person's full name or email."
+    )
 
 
 def update_state_from_message(
@@ -1091,7 +1326,17 @@ def update_state_from_message(
         allow_plain_text=current_step == "responsible_team",
     )
 
-    if responsible and (current_step in {"responsible_team", "ready_to_create"} or not state.responsible_team):
+    if responsible and (current_step in {"responsible_team", "responsible_confirmation", "ready_to_create"} or not state.responsible_team):
+        if responsible != state.responsible_team:
+            state.responsible_type = None
+            state.responsible_display_name = None
+            state.responsible_email = None
+            state.responsible_department = None
+            state.responsible_confidence = None
+            state.responsible_candidates = []
+            state.pending_responsible_query = None
+            state.responsible_needs_confirmation = False
+
         state.responsible_team = responsible
         extracted["responsible_team"] = responsible
 
@@ -1164,7 +1409,10 @@ def get_question_for_step(step: str) -> str | None:
 def assistant_state_to_slots(state: AssistantConversationState) -> dict[str, object]:
     return {
         "problem": state.objective,
-        "responsible": state.responsible_team,
+        "responsible": state.responsible_display_name or state.responsible_team,
+        "responsible_email": state.responsible_email,
+        "responsible_type": state.responsible_type,
+        "responsible_department": state.responsible_department,
         "deadline": state.deadline,
         "urgency": state.urgency,
         "sub_actions": state.include_subactions,
@@ -1217,6 +1465,9 @@ def build_assistant_prompt(
         f"Scope: {slots.get('scope') or 'my'}.",
         f"Problem: {slots.get('problem') or 'Not specified'}.",
         f"Responsible department/team/person: {slots.get('responsible') or inserted_by}.",
+        f"Resolved responsible email: {slots.get('responsible_email') or 'Not resolved'}.",
+        f"Resolved responsible type: {slots.get('responsible_type') or 'unknown'}.",
+        f"Resolved responsible department: {slots.get('responsible_department') or 'Not specified'}.",
         f"Deadline: {slots.get('deadline') or 'Not specified'}.",
         f"Priority/Urgency: {slots.get('urgency') or 'Normal business priority'}.",
         f"Sub-actions requested: {sub_actions}.",
@@ -1262,6 +1513,14 @@ def build_assistant_summary(
         ],
         actions_count=len(actions),
         main_responsible=str(slots.get("responsible") or first_responsible or ""),
+        main_responsible_email=str(slots.get("responsible_email") or ""),
+        responsible_resolution_status=(
+            "resolved_person"
+            if slots.get("responsible_email")
+            else "needs_owner_confirmation"
+            if slots.get("responsible_type") == "team"
+            else "unresolved"
+        ),
         deadline=str(slots.get("deadline") or (due_dates[-1] if due_dates else "")),
         urgency=str(slots.get("urgency") or first_urgency or "Normal"),
         sub_actions_included=bool(
@@ -1354,6 +1613,7 @@ async def assistant_chat_service(
             or "Tell me what you want to change in this action plan.",
             state="collecting_info",
             conversation_state=state,
+            responsible_candidates=state.responsible_candidates,
             summary=None,
             draft_id=None,
             draft=None,
@@ -1368,7 +1628,27 @@ async def assistant_chat_service(
         conversation_state = rebuild_state_from_history(payload)
         extracted = conversation_state.model_dump()
 
+    conversation_state = resolve_state_responsible(
+        conversation_state,
+        latest_message,
+        extracted,
+        payload.inserted_by,
+        directory_db,
+    )
+
     log_assistant_transition(current_step, extracted, conversation_state)
+
+    if conversation_state.responsible_needs_confirmation:
+        return AssistantChatResponse(
+            reply=build_responsible_confirmation_reply(conversation_state),
+            state="collecting_info",
+            conversation_state=conversation_state,
+            responsible_candidates=conversation_state.responsible_candidates,
+            summary=None,
+            draft_id=None,
+            draft=None,
+        )
+
     question = get_question_for_step(conversation_state.current_step)
 
     if question:
@@ -1376,6 +1656,7 @@ async def assistant_chat_service(
             reply=question,
             state="collecting_info",
             conversation_state=conversation_state,
+            responsible_candidates=conversation_state.responsible_candidates,
             summary=None,
             draft_id=None,
             draft=None,
@@ -1398,6 +1679,10 @@ async def assistant_chat_service(
                 ),
                 inserted_by=payload.inserted_by,
                 scope=payload.scope,
+                responsible_display_name=conversation_state.responsible_display_name,
+                responsible_email=conversation_state.responsible_email,
+                responsible_type=conversation_state.responsible_type,
+                responsible_department=conversation_state.responsible_department,
             ),
             directory_db,
             allow_fallback=True,
@@ -1408,6 +1693,7 @@ async def assistant_chat_service(
                 reply="AI generation failed and fallback generation was not available.",
                 state="error",
                 conversation_state=conversation_state,
+                responsible_candidates=conversation_state.responsible_candidates,
                 summary=None,
                 draft_id=None,
                 draft=None,
@@ -1417,6 +1703,7 @@ async def assistant_chat_service(
             reply=f"Draft validation failed: {exc.detail}",
             state="error",
             conversation_state=conversation_state,
+            responsible_candidates=conversation_state.responsible_candidates,
             summary=None,
             draft_id=None,
             draft=None,
@@ -1427,6 +1714,7 @@ async def assistant_chat_service(
             reply="Draft generation failed after fallback. Please simplify the request and try again.",
             state="error",
             conversation_state=conversation_state,
+            responsible_candidates=conversation_state.responsible_candidates,
             summary=None,
             draft_id=None,
             draft=None,
@@ -1436,6 +1724,7 @@ async def assistant_chat_service(
         reply="Here is the proposed action plan summary. Do you want me to create it?",
         state="ready_to_create",
         conversation_state=conversation_state,
+        responsible_candidates=[],
         summary=build_assistant_summary(draft, slots),
         draft_id=None,
         draft=draft,

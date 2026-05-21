@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.config.database import get_db
@@ -16,6 +16,7 @@ from app.services.ai_action_plan_service import (
     create_action_plan_service,
     generate_action_plan_draft_service,
 )
+from app.services.ia_responsible_resolver_service import search_responsibles_service
 
 
 router = APIRouter(prefix="/api/ai", tags=["AI Assistant"])
@@ -45,6 +46,15 @@ async def chat_with_ia_assistant(
     directory_db: Session = Depends(get_directory_db),
 ):
     return await assistant_chat_service(payload, db, directory_db)
+
+
+@router.get("/assistant/responsibles/search")
+async def search_ia_assistant_responsibles(
+    q: str = Query(..., min_length=1),
+    inserted_by: str | None = Query(None),
+    directory_db: Session = Depends(get_directory_db),
+):
+    return search_responsibles_service(q, directory_db, logged_user_email=inserted_by)
 
 
 @router.post("/assistant/create")

@@ -15,6 +15,7 @@ UNKNOWN_URGENCY = "Unknown"
 URGENT_URGENCY = "Urgent"
 FLEXIBLE_URGENCY = "Flexible"
 SECONDARY_URGENCY = "Secondaire"
+CLOSED_PRIORITY_INDEX = 0
 
 SKIPPED_STATUSES = {CLOSED_HOME_BUCKET, "archived", "hidden"}
 
@@ -217,7 +218,36 @@ def recalculate_action_priority(action):
     return changed
 
 
+def reset_closed_action_priority(action):
+    changed = (
+        action.urgency != SECONDARY_URGENCY
+        or (action.escalation_level or 0) != 0
+        or (action.priority_index or 0) != CLOSED_PRIORITY_INDEX
+    )
+
+    action.urgency = SECONDARY_URGENCY
+    action.escalation_level = 0
+    action.priority_index = CLOSED_PRIORITY_INDEX
+
+    return changed
+
+
+def recalculate_action_priority_for_status_change(action):
+    status = normalize_action_status(getattr(action, "status", None))
+
+    if status == CLOSED_HOME_BUCKET:
+        return reset_closed_action_priority(action)
+
+    return recalculate_action_priority(action)
+
+
 def enrich_action_priority(action):
+    status = normalize_action_status(getattr(action, "status", None))
+
+    if status == CLOSED_HOME_BUCKET:
+        reset_closed_action_priority(action)
+        return action
+
     if should_skip_priority_recalculation(action):
         return action
 

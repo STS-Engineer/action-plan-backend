@@ -2,9 +2,14 @@ from sqlalchemy import func, or_
 from app.models.action import Action
 from app.services.action_Service import action_to_dict, get_latest_action_history_map
 from app.models.sujet import Sujet
+from app.models.user import User
 from app.services.action_access_service import normalize_access_email
 from app.services.action_status_logic_service import get_action_active_predicate
-from app.services.directory_service import get_all_underlings
+from app.services.directory_service import get_underlings_until_depth
+
+
+TEAM_ACTIONS_MAX_DEPTH = 2
+SUPPORTED_SEARCH_SCOPES = {"my", "team", "requested_by_me"}
 
 
 def get_team_scope_emails(directory_db, email: str | None) -> list[str]:
@@ -13,14 +18,36 @@ def get_team_scope_emails(directory_db, email: str | None) -> list[str]:
     if not normalized_email or directory_db is None:
         return []
 
-    return [
+    return list(dict.fromkeys([
         normalized_underling_email
         for normalized_underling_email in (
             normalize_access_email(member.email)
-            for member in get_all_underlings(directory_db, normalized_email)
+            for member in get_underlings_until_depth(
+                directory_db,
+                normalized_email,
+                max_depth=TEAM_ACTIONS_MAX_DEPTH,
+            )
         )
         if normalized_underling_email
-    ]
+    ]))
+
+
+def get_requester_aliases(db, normalized_email: str | None) -> list[str]:
+    if not normalized_email:
+        return []
+
+    aliases = [normalized_email]
+    user = (
+        db.query(User.full_name)
+        .filter(func.lower(User.email) == normalized_email)
+        .first()
+    )
+    full_name = normalize_access_email(user.full_name if user else None)
+
+    if full_name and full_name not in aliases:
+        aliases.append(full_name)
+
+    return aliases
 
 
 async def search_actions_service(
@@ -37,8 +64,10 @@ async def search_actions_service(
     normalized_email = normalize_access_email(email)
     normalized_scope = scope.strip().lower() if scope else None
     email_responsable = func.lower(func.coalesce(Action.email_responsable, ""))
+    requester_email = func.lower(func.coalesce(Action.email_demandeur, ""))
+    requester_name = func.lower(func.coalesce(Action.demandeur, ""))
 
-    if (email or scope) and normalized_scope not in {"my", "team"}:
+    if (email or scope) and normalized_scope not in SUPPORTED_SEARCH_SCOPES:
         return []
 
     filters = [
@@ -47,6 +76,8 @@ async def search_actions_service(
             Action.titre.ilike(search),
             Action.description.ilike(search),
             Action.responsable.ilike(search),
+            Action.demandeur.ilike(search),
+            Action.email_demandeur.ilike(search),
             Action.status.ilike(search),
             Action.importance.ilike(search),
             Action.urgency.ilike(search),
@@ -66,6 +97,17 @@ async def search_actions_service(
             return []
 
         filters.append(email_responsable.in_(underling_emails))
+
+    if normalized_scope == "requested_by_me":
+        if not normalized_email:
+            return []
+
+        requester_values = get_requester_aliases(db, normalized_email)
+
+        filters.append(or_(
+            requester_email.in_(requester_values),
+            requester_name.in_(requester_values),
+        ))
 
     actions = (
         db.query(Action)

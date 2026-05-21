@@ -58,9 +58,20 @@ router = APIRouter(prefix="/api/action_plan_action", tags=["Action Plan"])
 @router.get("/sujets/{sujet_id}/actions")
 async def getActionsBySujetId(
     sujet_id: int,
-    db: Session = Depends(get_db)
+    email: str | None = None,
+    status: str | None = None,
+    scope: Literal["my", "team", "requested_by_me"] | None = None,
+    db: Session = Depends(get_db),
+    directory_db: Session = Depends(get_directory_db),
 ):
-    return await get_actions_by_sujet_id_service(sujet_id, db)
+    return await get_actions_by_sujet_id_service(
+        sujet_id=sujet_id,
+        db=db,
+        email=email,
+        scope=scope,
+        directory_db=directory_db,
+        status=status,
+    )
 
 @router.get("/actions/{action_id}")
 async def getActionById(
@@ -238,8 +249,8 @@ async def searchActions(
 @router.get("/filtered-actions")
 async def getFilteredActions(
     email: str = Query(...),
-    scope: Literal["my", "team"] = Query("my"),
-    status: Literal["overdue", "closed", "in_progress", "all"] = Query("all"),
+    scope: Literal["my", "team", "requested_by_me"] = Query("my"),
+    status: Literal["overdue", "closed", "in_progress", "blocked", "all"] = Query("all"),
     db: Session = Depends(get_db),
     directory_db: Session = Depends(get_directory_db),
     current_user: User = Depends(get_current_user),

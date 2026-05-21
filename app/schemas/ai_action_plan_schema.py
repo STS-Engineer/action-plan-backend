@@ -12,6 +12,10 @@ class AIActionPlanDraftRequest(BaseModel):
     scope: Literal["my", "team"] = "my"
     business_objective: str | None = None
     generation_context: str | None = None
+    responsible_display_name: str | None = None
+    responsible_email: str | None = None
+    responsible_type: Literal["person", "team", "unknown"] | None = None
+    responsible_department: str | None = None
 
     @field_validator("prompt", "inserted_by")
     @classmethod
@@ -23,7 +27,14 @@ class AIActionPlanDraftRequest(BaseModel):
 
         return normalized
 
-    @field_validator("business_objective", "generation_context")
+    @field_validator(
+        "business_objective",
+        "generation_context",
+        "responsible_display_name",
+        "responsible_email",
+        "responsible_type",
+        "responsible_department",
+    )
     @classmethod
     def strip_optional_text(cls, value: str | None):
         if value is None:
@@ -119,9 +130,28 @@ class AssistantMessage(BaseModel):
         return normalized
 
 
+class AssistantResponsibleCandidate(BaseModel):
+    type: Literal["person", "team", "unknown"] = "person"
+    display_name: str | None = None
+    email: str | None = None
+    department: str | None = None
+    job_title: str | None = None
+    site: str | None = None
+    confidence: float = 0
+    reason: str | None = None
+
+
 class AssistantConversationState(BaseModel):
     objective: str | None = None
     responsible_team: str | None = None
+    responsible_type: Literal["person", "team", "unknown"] | None = None
+    responsible_display_name: str | None = None
+    responsible_email: str | None = None
+    responsible_department: str | None = None
+    responsible_confidence: float | None = None
+    responsible_candidates: list[AssistantResponsibleCandidate] = Field(default_factory=list)
+    pending_responsible_query: str | None = None
+    responsible_needs_confirmation: bool = False
     deadline: str | None = None
     include_subactions: bool | None = None
     include_monitoring: bool | None = None
@@ -131,6 +161,7 @@ class AssistantConversationState(BaseModel):
     current_step: Literal[
         "objective",
         "responsible_team",
+        "responsible_confirmation",
         "deadline",
         "subactions",
         "urgency",
@@ -162,6 +193,8 @@ class AssistantSummary(BaseModel):
     features: list[str] = Field(default_factory=list)
     actions_count: int = 0
     main_responsible: str | None = None
+    main_responsible_email: str | None = None
+    responsible_resolution_status: str | None = None
     deadline: str | None = None
     urgency: str | None = None
     sub_actions_included: bool = False
@@ -171,6 +204,7 @@ class AssistantChatResponse(BaseModel):
     reply: str
     state: Literal["collecting_info", "ready_to_create", "created", "error"]
     conversation_state: AssistantConversationState | None = None
+    responsible_candidates: list[AssistantResponsibleCandidate] = Field(default_factory=list)
     summary: AssistantSummary | None = None
     draft_id: str | None = None
     draft: PlanV1 | None = None

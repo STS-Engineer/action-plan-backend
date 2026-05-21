@@ -2,7 +2,8 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 from app.models.action import Action
 from app.models.sujet import Sujet
-from sqlalchemy import and_, case, func
+from app.models.user import User
+from sqlalchemy import and_, case, func, or_
 import datetime
 from app.models.action_attachment import ActionAttachment
 from app.models.action_status_comment import ActionStatusComment
@@ -11,7 +12,8 @@ from app.services.action_priority_service import (
     enrich_action_priority,
     get_reaction_time_days,
     calculate_reaction_deadline,
-    is_escalation_ready
+    is_escalation_ready,
+    recalculate_action_priority_for_status_change,
 )
 from app.services.action_access_service import can_access_action, normalize_access_email
 from app.services.action_status_logic_service import (
@@ -26,6 +28,8 @@ from app.services.action_status_logic_service import (
 
 
 ACTION_DELETE_FORBIDDEN_MESSAGE = "You can only delete actions you own or manage."
+TEAM_ACTIONS_MAX_DEPTH = 2
+SUPPORTED_ACTION_SCOPES = {"my", "team", "requested_by_me"}
 
 def get_latest_action_history_map(db: Session, action_ids):
     unique_action_ids = list({action_id for action_id in action_ids if action_id is not None})
@@ -135,6 +139,7 @@ def action_detail_to_dict(action, root_sujet=None, latest_history=None):
         "priorite": action.priorite,
         "importance": action.importance,
         "urgency": action.urgency,
+        "escalation_level": action.escalation_level,
         "corrective_action_app": root_code.startswith("8D"),
         "rm_stock_app": "AP-RAW-MATERIAL" in root_code,
     }
@@ -209,14 +214,18 @@ def build_sujet_path_info_map(db: Session, sujet_ids):
 
 
 def get_team_scope_action_emails(email: str | None, directory_db) -> list[str]:
-    from app.services.directory_service import get_all_underlings
+    from app.services.directory_service import get_underlings_until_depth
 
     normalized_email = normalize_access_email(email)
 
     if not normalized_email:
         return []
 
-    underlings = get_all_underlings(directory_db, normalized_email)
+    underlings = get_underlings_until_depth(
+        directory_db,
+        normalized_email,
+        max_depth=TEAM_ACTIONS_MAX_DEPTH,
+    )
 
     return list(dict.fromkeys([
         normalized_underling_email
@@ -226,6 +235,69 @@ def get_team_scope_action_emails(email: str | None, directory_db) -> list[str]:
         )
         if normalized_underling_email
     ]))
+
+
+def normalize_action_scope(scope: str | None) -> str:
+    normalized_scope = (scope or "my").strip().lower()
+
+    if normalized_scope not in SUPPORTED_ACTION_SCOPES:
+        return "my"
+
+    return normalized_scope
+
+
+def get_requester_aliases(db: Session | None, normalized_email: str) -> list[str]:
+    aliases = [normalized_email]
+
+    if db is not None:
+        user = (
+            db.query(User.full_name)
+            .filter(func.lower(User.email) == normalized_email)
+            .first()
+        )
+        full_name = normalize_access_email(user.full_name if user else None)
+
+        if full_name and full_name not in aliases:
+            aliases.append(full_name)
+
+    return aliases
+
+
+def get_requester_action_predicate(action_like, requester_values: list[str]):
+    requester_email = func.lower(func.coalesce(action_like.email_demandeur, ""))
+    requester_name = func.lower(func.coalesce(action_like.demandeur, ""))
+
+    return or_(
+        requester_email.in_(requester_values),
+        requester_name.in_(requester_values),
+    )
+
+
+def build_action_scope_filter(
+    action_like,
+    normalized_email: str,
+    scope: str,
+    directory_db,
+    requester_values: list[str] | None = None,
+):
+    email_responsable = func.lower(func.coalesce(action_like.email_responsable, ""))
+    normalized_scope = normalize_action_scope(scope)
+
+    if normalized_scope == "team":
+        underling_emails = get_team_scope_action_emails(normalized_email, directory_db)
+
+        if not underling_emails:
+            return None
+
+        return email_responsable.in_(underling_emails)
+
+    if normalized_scope == "requested_by_me":
+        return get_requester_action_predicate(
+            action_like,
+            requester_values or [normalized_email],
+        )
+
+    return email_responsable == normalized_email
 
 
 def get_flat_action_canonical_status(action) -> str | None:
@@ -256,13 +328,12 @@ async def get_filtered_actions_service(
     if not normalized_email:
         return []
 
-    if normalized_scope not in {"my", "team"}:
+    if normalized_scope not in SUPPORTED_ACTION_SCOPES:
         raise HTTPException(status_code=400, detail="Invalid scope")
 
-    if normalized_status not in {"all", "closed", "in_progress", "overdue"}:
+    if normalized_status not in {"all", "closed", "in_progress", "overdue", "blocked"}:
         raise HTTPException(status_code=400, detail="Invalid status")
 
-    email_responsable = func.lower(func.coalesce(Action.email_responsable, ""))
     if normalized_status == "in_progress":
         normalized_action_status = get_normalized_action_status_expression(Action)
         status_predicate = and_(
@@ -278,15 +349,22 @@ async def get_filtered_actions_service(
 
     filters = [get_action_active_predicate(Action), status_predicate]
 
-    if normalized_scope == "team":
-        underling_emails = get_team_scope_action_emails(normalized_email, directory_db)
+    scope_filter = build_action_scope_filter(
+        Action,
+        normalized_email,
+        normalized_scope,
+        directory_db,
+        requester_values=(
+            get_requester_aliases(db, normalized_email)
+            if normalized_scope == "requested_by_me"
+            else None
+        ),
+    )
 
-        if not underling_emails:
-            return []
+    if scope_filter is None:
+        return []
 
-        filters.append(email_responsable.in_(underling_emails))
-    else:
-        filters.append(email_responsable == normalized_email)
+    filters.append(scope_filter)
 
     actions = (
         db.query(Action)
@@ -331,11 +409,49 @@ async def get_filtered_actions_service(
     return result
 
 
-async def get_actions_by_sujet_id_service(sujet_id: int, db: Session):
+async def get_actions_by_sujet_id_service(
+    sujet_id: int,
+    db: Session,
+    email: str | None = None,
+    scope: str | None = None,
+    directory_db=None,
+    status: str | None = None,
+):
+    normalized_email = normalize_access_email(email)
+    action_visibility_predicate = (
+        get_action_visible_from_home_predicate(Action)
+        if normalized_email
+        else get_action_active_predicate(Action)
+    )
+    filters = [
+        Action.sujet_id == sujet_id,
+        action_visibility_predicate,
+    ]
+
+    if normalized_email:
+        scope_filter = build_action_scope_filter(
+            Action,
+            normalized_email,
+            scope or "my",
+            directory_db,
+            requester_values=(
+                get_requester_aliases(db, normalized_email)
+                if normalize_action_scope(scope) == "requested_by_me"
+                else None
+            ),
+        )
+
+        if scope_filter is None:
+            return []
+
+        filters.append(scope_filter)
+
+    if status:
+        filters.append(get_action_home_bucket_predicate(status, Action))
+
     actions = (
         db.query(Action)
-        .filter(Action.sujet_id == sujet_id)
-        .filter(get_action_active_predicate(Action))
+        .filter(*filters)
         .order_by(Action.ordre.asc(), Action.created_at.desc())
         .all()
     )
@@ -472,21 +588,26 @@ async def update_action_status_service(
     )
 
     if not action:
-        return {"error": "Action not found"}
+        raise HTTPException(status_code=404, detail="Action not found")
 
     old_status = action.status
+    normalized_status = normalize_action_status(status) or "open"
+    now = datetime.datetime.now(datetime.timezone.utc)
 
-    action.status = status
+    action.status = normalized_status
 
-    if status == "closed":
+    if normalized_status == "closed":
         action.closed_date = datetime.date.today()
     else:
         action.closed_date = None
 
+    action.updated_at = now
+    recalculate_action_priority_for_status_change(action)
+
     status_comment = ActionStatusComment(
         action_id=action.id,
         old_status=old_status,
-        new_status=status,
+        new_status=normalized_status,
         comment=comment,
         created_by=created_by,
     )
@@ -495,7 +616,24 @@ async def update_action_status_service(
     db.commit()
     db.refresh(action)
 
-    return action
+    latest_history_by_action_id = get_latest_action_history_map(db, [action.id])
+    sujet_path_info_by_id = build_sujet_path_info_map(db, [action.sujet_id])
+    sujet_info = sujet_path_info_by_id.get(action.sujet_id, {})
+    payload = action_to_dict(
+        action,
+        root_sujet=sujet_info.get("root_sujet"),
+        latest_history=latest_history_by_action_id.get(action.id),
+    )
+    payload.pop("_sa_instance_state", None)
+    payload.update({
+        "topic_path": sujet_info.get("topic_path"),
+        "sujet_title": sujet_info.get("sujet_title"),
+        "root_sujet_title": sujet_info.get("root_sujet_title"),
+        "status_bucket": get_action_home_bucket(action),
+        "canonical_status": get_flat_action_canonical_status(action),
+    })
+
+    return payload
 
 
 async def get_action_status_comments_service(action_id: int, db: Session):
@@ -549,8 +687,6 @@ async def get_my_actions_service(email: str, db: Session):
         for action in actions
     ]
 async def get_team_actions_service(email: str, db: Session, directory_db):
-    from app.services.directory_service import get_all_underlings
-
     normalized_email = normalize_access_email(email)
 
     if not normalized_email:
@@ -559,16 +695,7 @@ async def get_team_actions_service(email: str, db: Session, directory_db):
             "actions": [],
         }
 
-    underlings = get_all_underlings(directory_db, normalized_email)
-    underling_emails = [
-        normalized_underling_email
-        for normalized_underling_email in (
-            normalize_access_email(member.email)
-            for member in underlings
-        )
-        if normalized_underling_email
-    ]
-    underling_emails = list(dict.fromkeys(underling_emails))
+    underling_emails = get_team_scope_action_emails(normalized_email, directory_db)
 
     if not underling_emails:
         return {
@@ -735,6 +862,7 @@ async def mark_action_closed_from_email_service(action_id: int, db):
     action.status = "closed"
     action.closed_date = datetime.date.today()
     action.updated_at = datetime.datetime.now(datetime.timezone.utc)
+    recalculate_action_priority_for_status_change(action)
 
     log_action_event(
         db=db,

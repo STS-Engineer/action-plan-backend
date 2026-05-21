@@ -1,10 +1,12 @@
 from app.models.sujet import Sujet
 from app.models.action import Action
-from sqlalchemy import case, func, select
+from app.models.user import User
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.orm import Session, aliased
 
 from app.services.action_status_logic_service import (
     get_action_active_predicate,
+    get_action_blocked_predicate,
     get_action_closed_visible_predicate,
     get_action_home_bucket_predicate,
     get_action_in_progress_predicate,
@@ -13,6 +15,9 @@ from app.services.action_status_logic_service import (
     get_normalized_action_status_expression,
 )
 
+
+TEAM_ACTIONS_MAX_DEPTH = 2
+SUPPORTED_HOME_SCOPES = {"my", "team", "requested_by_me"}
 
 ZERO_HOME_SUMMARY = {
     "total_sujets": 0,
@@ -48,6 +53,28 @@ def normalize_scope_emails(emails: list[str] | None) -> list[str]:
     return normalized_emails
 
 
+def get_requester_aliases(db: Session | None, email: str | None) -> list[str]:
+    normalized_email = normalize_scope_email(email)
+
+    if not normalized_email:
+        return []
+
+    aliases = [normalized_email]
+
+    if db is not None:
+        user = (
+            db.query(User.full_name)
+            .filter(func.lower(User.email) == normalized_email)
+            .first()
+        )
+        full_name = normalize_scope_email(user.full_name if user else None)
+
+        if full_name and full_name not in aliases:
+            aliases.append(full_name)
+
+    return aliases
+
+
 def build_sujet_tree_cte():
     sujet_tree = (
         select(
@@ -69,8 +96,45 @@ def build_sujet_tree_cte():
     )
 
 
-def build_scope_predicate(action_like=Action, email: str | None = None, emails: list[str] | None = None):
+def build_child_sujet_tree_cte(parent_sujet_id: int):
+    sujet_tree = (
+        select(
+            Sujet.id.label("root_id"),
+            Sujet.id.label("sujet_id"),
+        )
+        .where(Sujet.parent_sujet_id == parent_sujet_id)
+        .cte(name="child_sujet_tree", recursive=True)
+    )
+
+    child_sujet = aliased(Sujet)
+
+    return sujet_tree.union_all(
+        select(
+            sujet_tree.c.root_id,
+            child_sujet.id,
+        )
+        .where(child_sujet.parent_sujet_id == sujet_tree.c.sujet_id)
+    )
+
+
+def build_scope_predicate(
+    action_like=Action,
+    email: str | None = None,
+    emails: list[str] | None = None,
+    requester_email: str | None = None,
+    requester_values: list[str] | None = None,
+):
     email_col = func.lower(func.coalesce(action_like.email_responsable, ""))
+
+    if requester_email:
+        requester_email_col = func.lower(func.coalesce(action_like.email_demandeur, ""))
+        requester_name_col = func.lower(func.coalesce(action_like.demandeur, ""))
+        values = normalize_scope_emails([requester_email, *(requester_values or [])])
+
+        return or_(
+            requester_email_col.in_(values),
+            requester_name_col.in_(values),
+        )
 
     if email:
         return email_col == email
@@ -84,8 +148,12 @@ def build_scope_predicate(action_like=Action, email: str | None = None, emails: 
 def build_visible_scoped_actions_subquery(
     email: str | None = None,
     emails: list[str] | None = None,
+    requester_email: str | None = None,
+    requester_values: list[str] | None = None,
+    sujet_tree=None,
 ):
-    sujet_tree = build_sujet_tree_cte()
+    if sujet_tree is None:
+        sujet_tree = build_sujet_tree_cte()
 
     query = (
         select(
@@ -101,7 +169,13 @@ def build_visible_scoped_actions_subquery(
         .where(get_action_visible_from_home_predicate(Action))
     )
 
-    scope_predicate = build_scope_predicate(Action, email=email, emails=emails)
+    scope_predicate = build_scope_predicate(
+        Action,
+        email=email,
+        emails=emails,
+        requester_email=requester_email,
+        requester_values=requester_values,
+    )
 
     if scope_predicate is not None:
         query = query.where(scope_predicate)
@@ -135,6 +209,13 @@ def build_root_action_stats_subquery(scoped_actions):
                     )
                 )
             ).label("in_progress_actions"),
+            func.count(
+                func.distinct(
+                    case(
+                        (get_action_blocked_predicate(scoped_actions), scoped_actions.c.action_id),
+                    )
+                )
+            ).label("blocked_actions"),
         )
         .select_from(scoped_actions)
         .group_by(scoped_actions.c.root_id)
@@ -161,7 +242,6 @@ def build_direct_child_count_subquery():
         )
         .select_from(Sujet)
         .outerjoin(child_sujet, Sujet.id == child_sujet.parent_sujet_id)
-        .where(Sujet.parent_sujet_id.is_(None))
         .group_by(Sujet.id)
         .subquery()
     )
@@ -173,6 +253,7 @@ def serialize_root_sujet_row(
     completed_actions,
     overdue_actions,
     in_progress_actions,
+    blocked_actions,
     total_sous_sujets,
 ):
     return {
@@ -181,25 +262,77 @@ def serialize_root_sujet_row(
         "completed_actions": completed_actions or 0,
         "overdue_actions": overdue_actions or 0,
         "in_progress_actions": in_progress_actions or 0,
+        "blocked_actions": blocked_actions or 0,
         "total_sous_sujets": total_sous_sujets or 0,
     }
 
 
 def get_scope_emails_for_team(email: str | None, directory_db) -> list[str]:
-    from app.services.directory_service import get_all_underlings
+    from app.services.directory_service import get_underlings_until_depth
 
     normalized_email = normalize_scope_email(email)
 
     if not normalized_email:
         return []
 
-    underlings = get_all_underlings(directory_db, normalized_email)
+    underlings = get_underlings_until_depth(
+        directory_db,
+        normalized_email,
+        max_depth=TEAM_ACTIONS_MAX_DEPTH,
+    )
 
     return normalize_scope_emails([
         member.email
         for member in underlings
         if member.email
     ])
+
+
+def normalize_home_scope(scope: str | None) -> str:
+    normalized_scope = (scope or "my").strip().lower()
+
+    if normalized_scope not in SUPPORTED_HOME_SCOPES:
+        return "my"
+
+    return normalized_scope
+
+
+def build_scoped_actions_for_home_scope(
+    email: str | None,
+    scope: str | None,
+    directory_db=None,
+    sujet_tree=None,
+    db: Session | None = None,
+):
+    normalized_email = normalize_scope_email(email)
+
+    if not normalized_email:
+        return None
+
+    normalized_scope = normalize_home_scope(scope)
+
+    if normalized_scope == "team":
+        scope_emails = get_scope_emails_for_team(normalized_email, directory_db)
+
+        if not scope_emails:
+            return None
+
+        return build_visible_scoped_actions_subquery(
+            emails=scope_emails,
+            sujet_tree=sujet_tree,
+        )
+
+    if normalized_scope == "requested_by_me":
+        return build_visible_scoped_actions_subquery(
+            requester_email=normalized_email,
+            requester_values=get_requester_aliases(db, normalized_email),
+            sujet_tree=sujet_tree,
+        )
+
+    return build_visible_scoped_actions_subquery(
+        email=normalized_email,
+        sujet_tree=sujet_tree,
+    )
 
 
 async def getSujetsService(db: Session):
@@ -241,22 +374,15 @@ async def get_home_summary_service(
     db: Session,
     directory_db,
 ):
-    normalized_email = normalize_scope_email(email)
+    scoped_actions = build_scoped_actions_for_home_scope(
+        email=email,
+        scope=scope,
+        directory_db=directory_db,
+        db=db,
+    )
 
-    if not normalized_email:
+    if scoped_actions is None:
         return dict(ZERO_HOME_SUMMARY)
-
-    if scope == "team":
-        scope_emails = get_scope_emails_for_team(normalized_email, directory_db)
-
-        if not scope_emails:
-            return dict(ZERO_HOME_SUMMARY)
-
-        scoped_actions = build_visible_scoped_actions_subquery(emails=scope_emails)
-    else:
-        scoped_actions = build_visible_scoped_actions_subquery(email=normalized_email)
-
-    normalized_status = get_normalized_action_status_expression(scoped_actions)
 
     summary = (
         db.query(
@@ -285,12 +411,12 @@ async def get_home_summary_service(
             ).label("actions_in_progress"),
             func.count(
                 func.distinct(
-                    case((normalized_status == "open", scoped_actions.c.action_id))
+                    case((get_normalized_action_status_expression(scoped_actions) == "open", scoped_actions.c.action_id))
                 )
             ).label("actions_open"),
             func.count(
                 func.distinct(
-                    case((normalized_status == "blocked", scoped_actions.c.action_id))
+                    case((get_action_blocked_predicate(scoped_actions), scoped_actions.c.action_id))
                 )
             ).label("actions_blocked"),
         )
@@ -313,9 +439,19 @@ async def getSujetsRacineService(
     db: Session,
     email: str | None = None,
     status: str | None = None,
+    scope: str = "my",
+    directory_db=None,
 ):
-    normalized_email = normalize_scope_email(email)
-    scoped_actions = build_visible_scoped_actions_subquery(email=normalized_email)
+    scoped_actions = build_scoped_actions_for_home_scope(
+        email=email,
+        scope=scope,
+        directory_db=directory_db,
+        db=db,
+    )
+
+    if scoped_actions is None:
+        return []
+
     root_stats = build_root_action_stats_subquery(scoped_actions)
     direct_child_counts = build_direct_child_count_subquery()
     matching_root_ids_query = build_matching_root_ids_query(scoped_actions, status=status)
@@ -327,6 +463,7 @@ async def getSujetsRacineService(
             func.coalesce(root_stats.c.completed_actions, 0).label("completed_actions"),
             func.coalesce(root_stats.c.overdue_actions, 0).label("overdue_actions"),
             func.coalesce(root_stats.c.in_progress_actions, 0).label("in_progress_actions"),
+            func.coalesce(root_stats.c.blocked_actions, 0).label("blocked_actions"),
             func.coalesce(direct_child_counts.c.total_sous_sujets, 0).label("total_sous_sujets"),
         )
         .outerjoin(root_stats, root_stats.c.root_id == Sujet.id)
@@ -344,6 +481,7 @@ async def getSujetsRacineService(
             completed_actions=completed_actions,
             overdue_actions=overdue_actions,
             in_progress_actions=in_progress_actions,
+            blocked_actions=blocked_actions,
             total_sous_sujets=total_sous_sujets,
         )
         for (
@@ -352,19 +490,83 @@ async def getSujetsRacineService(
             completed_actions,
             overdue_actions,
             in_progress_actions,
+            blocked_actions,
             total_sous_sujets,
         ) in sujets_racine
     ]
 
 
-async def get_sous_sujets_by_sujet_id_service(sujet_id: int, db: Session):
+async def get_sous_sujets_by_sujet_id_service(
+    sujet_id: int,
+    db: Session,
+    email: str | None = None,
+    scope: str | None = None,
+    directory_db=None,
+    status: str | None = None,
+):
+    if not email:
+        sous_sujets = (
+            db.query(Sujet)
+            .filter(Sujet.parent_sujet_id == sujet_id)
+            .order_by(Sujet.created_at.desc())
+            .all()
+        )
+        return sous_sujets
+
+    sujet_tree = build_child_sujet_tree_cte(sujet_id)
+    scoped_actions = build_scoped_actions_for_home_scope(
+        email=email,
+        scope=scope,
+        directory_db=directory_db,
+        sujet_tree=sujet_tree,
+        db=db,
+    )
+
+    if scoped_actions is None:
+        return []
+
+    root_stats = build_root_action_stats_subquery(scoped_actions)
+    direct_child_counts = build_direct_child_count_subquery()
+    matching_root_ids_query = build_matching_root_ids_query(scoped_actions, status=status)
+
     sous_sujets = (
-        db.query(Sujet)
+        db.query(
+            Sujet,
+            func.coalesce(root_stats.c.total_actions, 0).label("total_actions"),
+            func.coalesce(root_stats.c.completed_actions, 0).label("completed_actions"),
+            func.coalesce(root_stats.c.overdue_actions, 0).label("overdue_actions"),
+            func.coalesce(root_stats.c.in_progress_actions, 0).label("in_progress_actions"),
+            func.coalesce(root_stats.c.blocked_actions, 0).label("blocked_actions"),
+            func.coalesce(direct_child_counts.c.total_sous_sujets, 0).label("total_sous_sujets"),
+        )
+        .outerjoin(root_stats, root_stats.c.root_id == Sujet.id)
+        .outerjoin(direct_child_counts, direct_child_counts.c.root_id == Sujet.id)
         .filter(Sujet.parent_sujet_id == sujet_id)
+        .filter(Sujet.id.in_(matching_root_ids_query))
         .order_by(Sujet.created_at.desc())
         .all()
     )
-    return sous_sujets
+
+    return [
+        serialize_root_sujet_row(
+            sujet=sujet,
+            total_actions=total_actions,
+            completed_actions=completed_actions,
+            overdue_actions=overdue_actions,
+            in_progress_actions=in_progress_actions,
+            blocked_actions=blocked_actions,
+            total_sous_sujets=total_sous_sujets,
+        )
+        for (
+            sujet,
+            total_actions,
+            completed_actions,
+            overdue_actions,
+            in_progress_actions,
+            blocked_actions,
+            total_sous_sujets,
+        ) in sous_sujets
+    ]
 
 
 async def get_team_sujets_racine_service(
@@ -373,12 +575,16 @@ async def get_team_sujets_racine_service(
     directory_db,
     status: str | None = None,
 ):
-    scope_emails = get_scope_emails_for_team(email, directory_db)
+    scoped_actions = build_scoped_actions_for_home_scope(
+        email=email,
+        scope="team",
+        directory_db=directory_db,
+        db=db,
+    )
 
-    if not scope_emails:
+    if scoped_actions is None:
         return []
 
-    scoped_actions = build_visible_scoped_actions_subquery(emails=scope_emails)
     root_stats = build_root_action_stats_subquery(scoped_actions)
     direct_child_counts = build_direct_child_count_subquery()
     matching_root_ids_query = build_matching_root_ids_query(scoped_actions, status=status)
@@ -390,6 +596,7 @@ async def get_team_sujets_racine_service(
             func.coalesce(root_stats.c.completed_actions, 0).label("completed_actions"),
             func.coalesce(root_stats.c.overdue_actions, 0).label("overdue_actions"),
             func.coalesce(root_stats.c.in_progress_actions, 0).label("in_progress_actions"),
+            func.coalesce(root_stats.c.blocked_actions, 0).label("blocked_actions"),
             func.coalesce(direct_child_counts.c.total_sous_sujets, 0).label("total_sous_sujets"),
         )
         .outerjoin(root_stats, root_stats.c.root_id == Sujet.id)
@@ -407,6 +614,7 @@ async def get_team_sujets_racine_service(
             completed_actions=completed_actions,
             overdue_actions=overdue_actions,
             in_progress_actions=in_progress_actions,
+            blocked_actions=blocked_actions,
             total_sous_sujets=total_sous_sujets,
         )
         for (
@@ -415,6 +623,7 @@ async def get_team_sujets_racine_service(
             completed_actions,
             overdue_actions,
             in_progress_actions,
+            blocked_actions,
             total_sous_sujets,
         ) in sujets_racine
     ]

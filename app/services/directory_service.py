@@ -32,33 +32,46 @@ def get_direct_reports(db, manager_email: str):
     )
 
 
-def get_all_underlings(db, manager_email: str):
+def get_underlings_until_depth(db, manager_email: str, max_depth: int | None = None):
     manager_email = normalize_email(manager_email)
 
     if not manager_email:
         return []
 
     result = []
-    visited = set()
-    queue = [manager_email]
+    visited_managers = set()
+    seen_members = set()
+    queue = [(manager_email, 0)]
 
     while queue:
-        current_manager_email = queue.pop(0)
+        current_manager_email, depth = queue.pop(0)
 
-        if current_manager_email in visited:
+        if current_manager_email in visited_managers:
             continue
 
-        visited.add(current_manager_email)
+        visited_managers.add(current_manager_email)
+
+        if max_depth is not None and depth >= max_depth:
+            continue
 
         direct_reports = get_direct_reports(db, current_manager_email)
 
         for member in direct_reports:
-            result.append(member)
+            member_email = normalize_email(member.email)
+            member_key = member_email or f"id:{member.id}"
 
-            if member.email:
-                queue.append(member.email.lower())
+            if member_key not in seen_members:
+                seen_members.add(member_key)
+                result.append(member)
+
+            if member_email:
+                queue.append((member_email, depth + 1))
 
     return result
+
+
+def get_all_underlings(db, manager_email: str):
+    return get_underlings_until_depth(db, manager_email)
 
 
 def get_manager_chain(db, email: str):
