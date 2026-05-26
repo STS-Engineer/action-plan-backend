@@ -186,6 +186,36 @@ def find_member_by_name(directory_db, name: str | None):
     return None
 
 
+def get_requester_display_name(inserted_by: str, directory_db) -> str:
+    requester_email = normalize_optional_email(inserted_by)
+
+    if requester_email and directory_db is not None:
+        try:
+            member = get_member_by_email(directory_db, requester_email)
+        except Exception as exc:
+            logger.info("IA Assistant requester directory lookup unavailable: %s", exc)
+            member = None
+
+        if member:
+            for value in [
+                getattr(member, "display_name", None),
+                " ".join(
+                    part
+                    for part in [
+                        getattr(member, "first_name", None),
+                        getattr(member, "last_name", None),
+                    ]
+                    if part
+                ),
+            ]:
+                cleaned = clean_human_text(value)
+
+                if cleaned:
+                    return cleaned
+
+    return clean_human_text(inserted_by, inserted_by) or inserted_by
+
+
 def resolve_responsable(
     action: ActionNode,
     inserted_by: str,
@@ -242,14 +272,25 @@ def normalize_action_node(
     action.escalation_level = max(int(action.escalation_level or 0), 0)
     action.type = ACTION_TYPES[action_depth]
     action.ordre = action.ordre if action.ordre is not None else order
+    action.demandeur = get_requester_display_name(inserted_by, directory_db)
+    action.email_demandeur = normalize_optional_email(inserted_by)
+
+    if action.due_date is None:
+        action.due_date = datetime.date.today() + datetime.timedelta(
+            days=7 + order + (action_depth * 3)
+        )
 
     resolve_responsable(action, inserted_by, directory_db, warnings)
 
-    action.priority_index = calculate_priority_index(
-        action.importance,
-        action.urgency,
-        action.escalation_level,
-    )
+    if action.status == "closed":
+        action.escalation_level = 0
+        action.priority_index = 0
+    else:
+        action.priority_index = calculate_priority_index(
+            action.importance,
+            action.urgency,
+            action.escalation_level,
+        )
 
     if action.priorite is None:
         action.priorite = priority_index_to_priorite(action.priority_index)
@@ -592,8 +633,8 @@ async def generate_llm_draft_payload(payload: AIActionPlanDraftRequest):
         "{version:'1.0', plan_title:string, plan_code:string|null, inserted_by:string, "
         "sujets:[{titre, code, description, sujets, actions}], warnings:[string]}. "
         "Each action must have titre, description, status, priorite, responsable, "
-        "email_responsable, due_date, ordre, importance, urgency, escalation_level, "
-        "priority_index, type, sub_actions, warnings. "
+        "email_responsable, demandeur, email_demandeur, due_date, ordre, importance, "
+        "urgency, escalation_level, priority_index, type, sub_actions, warnings. "
         "Use max 3 sujet levels, max 3 action levels, max 50 actions. "
         "Allowed statuses: open, blocked, closed. "
         "Use French importance labels: haute, moyenne, faible. "
@@ -605,6 +646,7 @@ async def generate_llm_draft_payload(payload: AIActionPlanDraftRequest):
         "business_objective": get_payload_business_objective(payload),
         "generation_context": payload.generation_context,
         "inserted_by": payload.inserted_by,
+        "requester_email": normalize_optional_email(payload.inserted_by),
         "scope": payload.scope,
         "today": today,
     }
@@ -1750,6 +1792,8 @@ def ingest_action_recursive(
         priorite=action_node.priorite,
         responsable=action_node.responsable,
         email_responsable=action_node.email_responsable,
+        demandeur=action_node.demandeur,
+        email_demandeur=action_node.email_demandeur,
         due_date=action_node.due_date,
         importance=action_node.importance,
         urgency=action_node.urgency,

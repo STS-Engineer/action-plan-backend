@@ -2,8 +2,11 @@ from sqlalchemy import func, or_
 from app.models.action import Action
 from app.services.action_Service import action_to_dict, get_latest_action_history_map
 from app.models.sujet import Sujet
-from app.models.user import User
 from app.services.action_access_service import normalize_access_email
+from app.services.action_requester_scope_service import (
+    build_requester_scope_predicate,
+    get_logged_user_requester_aliases,
+)
 from app.services.action_status_logic_service import get_action_active_predicate
 from app.services.directory_service import get_underlings_until_depth
 
@@ -32,22 +35,12 @@ def get_team_scope_emails(directory_db, email: str | None) -> list[str]:
     ]))
 
 
-def get_requester_aliases(db, normalized_email: str | None) -> list[str]:
-    if not normalized_email:
-        return []
-
-    aliases = [normalized_email]
-    user = (
-        db.query(User.full_name)
-        .filter(func.lower(User.email) == normalized_email)
-        .first()
+def get_requester_aliases(db, normalized_email: str | None, directory_db=None) -> list[str]:
+    return get_logged_user_requester_aliases(
+        db,
+        normalized_email,
+        directory_db=directory_db,
     )
-    full_name = normalize_access_email(user.full_name if user else None)
-
-    if full_name and full_name not in aliases:
-        aliases.append(full_name)
-
-    return aliases
 
 
 async def search_actions_service(
@@ -64,8 +57,6 @@ async def search_actions_service(
     normalized_email = normalize_access_email(email)
     normalized_scope = scope.strip().lower() if scope else None
     email_responsable = func.lower(func.coalesce(Action.email_responsable, ""))
-    requester_email = func.lower(func.coalesce(Action.email_demandeur, ""))
-    requester_name = func.lower(func.coalesce(Action.demandeur, ""))
 
     if (email or scope) and normalized_scope not in SUPPORTED_SEARCH_SCOPES:
         return []
@@ -102,12 +93,18 @@ async def search_actions_service(
         if not normalized_email:
             return []
 
-        requester_values = get_requester_aliases(db, normalized_email)
+        requester_values = get_requester_aliases(db, normalized_email, directory_db)
 
-        filters.append(or_(
-            requester_email.in_(requester_values),
-            requester_name.in_(requester_values),
-        ))
+        requester_scope_filter = build_requester_scope_predicate(
+            Action,
+            normalized_email,
+            requester_values=requester_values,
+        )
+
+        if requester_scope_filter is None:
+            return []
+
+        filters.append(requester_scope_filter)
 
     actions = (
         db.query(Action)

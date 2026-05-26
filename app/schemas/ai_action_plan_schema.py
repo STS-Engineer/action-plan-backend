@@ -53,6 +53,8 @@ class ActionNode(BaseModel):
     priorite: int | None = None
     responsable: str | None = None
     email_responsable: str | None = None
+    demandeur: str | None = None
+    email_demandeur: str | None = None
     due_date: datetime.date | None = None
     ordre: int | None = None
     importance: str = "moyenne"

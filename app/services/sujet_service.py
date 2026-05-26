@@ -1,9 +1,14 @@
 from app.models.sujet import Sujet
 from app.models.action import Action
-from app.models.user import User
-from sqlalchemy import case, func, or_, select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session, aliased
 
+from app.services.action_requester_scope_service import (
+    build_requester_scope_predicate,
+    get_logged_user_requester_aliases,
+    normalize_requester_value,
+    unique_requester_values,
+)
 from app.services.action_status_logic_service import (
     get_action_active_predicate,
     get_action_blocked_predicate,
@@ -31,48 +36,19 @@ ZERO_HOME_SUMMARY = {
 
 
 def normalize_scope_email(email: str | None) -> str | None:
-    if not email:
-        return None
-
-    normalized_email = email.strip().lower()
-    return normalized_email or None
+    return normalize_requester_value(email)
 
 
 def normalize_scope_emails(emails: list[str] | None) -> list[str]:
-    if not emails:
-        return []
-
-    normalized_emails = []
-
-    for email in emails:
-        normalized_email = normalize_scope_email(email)
-
-        if normalized_email and normalized_email not in normalized_emails:
-            normalized_emails.append(normalized_email)
-
-    return normalized_emails
+    return unique_requester_values(emails or [])
 
 
-def get_requester_aliases(db: Session | None, email: str | None) -> list[str]:
-    normalized_email = normalize_scope_email(email)
-
-    if not normalized_email:
-        return []
-
-    aliases = [normalized_email]
-
-    if db is not None:
-        user = (
-            db.query(User.full_name)
-            .filter(func.lower(User.email) == normalized_email)
-            .first()
-        )
-        full_name = normalize_scope_email(user.full_name if user else None)
-
-        if full_name and full_name not in aliases:
-            aliases.append(full_name)
-
-    return aliases
+def get_requester_aliases(
+    db: Session | None,
+    email: str | None,
+    directory_db=None,
+) -> list[str]:
+    return get_logged_user_requester_aliases(db, email, directory_db=directory_db)
 
 
 def build_sujet_tree_cte():
@@ -127,13 +103,10 @@ def build_scope_predicate(
     email_col = func.lower(func.coalesce(action_like.email_responsable, ""))
 
     if requester_email:
-        requester_email_col = func.lower(func.coalesce(action_like.email_demandeur, ""))
-        requester_name_col = func.lower(func.coalesce(action_like.demandeur, ""))
-        values = normalize_scope_emails([requester_email, *(requester_values or [])])
-
-        return or_(
-            requester_email_col.in_(values),
-            requester_name_col.in_(values),
+        return build_requester_scope_predicate(
+            action_like,
+            requester_email,
+            requester_values=requester_values,
         )
 
     if email:
@@ -325,7 +298,7 @@ def build_scoped_actions_for_home_scope(
     if normalized_scope == "requested_by_me":
         return build_visible_scoped_actions_subquery(
             requester_email=normalized_email,
-            requester_values=get_requester_aliases(db, normalized_email),
+            requester_values=get_requester_aliases(db, normalized_email, directory_db),
             sujet_tree=sujet_tree,
         )
 

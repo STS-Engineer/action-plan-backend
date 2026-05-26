@@ -2,7 +2,6 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 from app.models.action import Action
 from app.models.sujet import Sujet
-from app.models.user import User
 from sqlalchemy import and_, case, func, or_
 import datetime
 from app.models.action_attachment import ActionAttachment
@@ -16,6 +15,10 @@ from app.services.action_priority_service import (
     recalculate_action_priority_for_status_change,
 )
 from app.services.action_access_service import can_access_action, normalize_access_email
+from app.services.action_requester_scope_service import (
+    build_requester_scope_predicate,
+    get_logged_user_requester_aliases,
+)
 from app.services.action_status_logic_service import (
     get_action_active_predicate,
     get_action_home_bucket,
@@ -131,6 +134,8 @@ def action_detail_to_dict(action, root_sujet=None, latest_history=None):
         "status": action.status,
         "responsable": action.responsable,
         "email_responsable": action.email_responsable,
+        "demandeur": action.demandeur,
+        "email_demandeur": action.email_demandeur,
         "sujet_id": action.sujet_id,
         "parent_action_id": action.parent_action_id,
         "due_date": action.due_date,
@@ -246,30 +251,24 @@ def normalize_action_scope(scope: str | None) -> str:
     return normalized_scope
 
 
-def get_requester_aliases(db: Session | None, normalized_email: str) -> list[str]:
-    aliases = [normalized_email]
-
-    if db is not None:
-        user = (
-            db.query(User.full_name)
-            .filter(func.lower(User.email) == normalized_email)
-            .first()
-        )
-        full_name = normalize_access_email(user.full_name if user else None)
-
-        if full_name and full_name not in aliases:
-            aliases.append(full_name)
-
-    return aliases
+def get_requester_aliases(
+    db: Session | None,
+    normalized_email: str,
+    directory_db=None,
+) -> list[str]:
+    return get_logged_user_requester_aliases(
+        db,
+        normalized_email,
+        directory_db=directory_db,
+    )
 
 
 def get_requester_action_predicate(action_like, requester_values: list[str]):
-    requester_email = func.lower(func.coalesce(action_like.email_demandeur, ""))
-    requester_name = func.lower(func.coalesce(action_like.demandeur, ""))
-
-    return or_(
-        requester_email.in_(requester_values),
-        requester_name.in_(requester_values),
+    logged_user_email = requester_values[0] if requester_values else None
+    return build_requester_scope_predicate(
+        action_like,
+        logged_user_email,
+        requester_values=requester_values,
     )
 
 
@@ -355,7 +354,7 @@ async def get_filtered_actions_service(
         normalized_scope,
         directory_db,
         requester_values=(
-            get_requester_aliases(db, normalized_email)
+            get_requester_aliases(db, normalized_email, directory_db)
             if normalized_scope == "requested_by_me"
             else None
         ),
@@ -435,7 +434,7 @@ async def get_actions_by_sujet_id_service(
             scope or "my",
             directory_db,
             requester_values=(
-                get_requester_aliases(db, normalized_email)
+                get_requester_aliases(db, normalized_email, directory_db)
                 if normalize_action_scope(scope) == "requested_by_me"
                 else None
             ),
