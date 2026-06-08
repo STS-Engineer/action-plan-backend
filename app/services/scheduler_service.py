@@ -1,5 +1,6 @@
 import os
 import asyncio
+import logging
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -14,6 +15,7 @@ from app.services.weekly_report_service import (
 from app.services.action_overdue_service import update_overdue_actions_service
 
 scheduler = BackgroundScheduler(timezone="Africa/Tunis")
+logger = logging.getLogger(__name__)
 
 
 def run_async_job(async_func):
@@ -24,20 +26,20 @@ async def daily_reminders_job():
     db = SessionLocal()
 
     try:
-        print("[SCHEDULER] Updating overdue actions...")
+        logger.info("[SCHEDULER] Updating overdue actions...")
         overdue_result = await update_overdue_actions_service(db)
-        print("[SCHEDULER] Overdue update result:", overdue_result)
+        logger.info("[SCHEDULER] Overdue update result=%s", overdue_result)
 
-        print("[SCHEDULER] Recalculating priorities...")
+        logger.info("[SCHEDULER] Recalculating priorities...")
         priority_result = await recalculate_all_priorities_service(db)
-        print("[SCHEDULER] Priority recalculation result:", priority_result)
+        logger.info("[SCHEDULER] Priority recalculation result=%s", priority_result)
 
-        print("[SCHEDULER] Running daily grouped reminders...")
+        logger.info("[SCHEDULER] Running daily grouped reminders...")
         result = await send_grouped_due_date_reminders_service(db)
-        print("[SCHEDULER] Daily reminders result:", result)
+        logger.info("[SCHEDULER] Daily reminders result=%s", result)
 
-    except Exception as e:
-        print("[SCHEDULER] Daily reminders failed:", str(e))
+    except Exception:
+        logger.exception("[SCHEDULER] Daily reminders failed.")
 
     finally:
         db.close()
@@ -47,35 +49,87 @@ async def weekly_reports_job():
     db = SessionLocal()
 
     try:
-        print("[SCHEDULER] Running weekly responsable reports...")
+        logger.info("[SCHEDULER] Running weekly responsable reports...")
         responsable_result = await send_weekly_responsable_reports_service(db)
-        print("[SCHEDULER] Weekly responsable reports result:", responsable_result)
+        logger.info("[SCHEDULER] Weekly responsable reports result=%s", responsable_result)
 
-        print("[SCHEDULER] Running weekly demandeur reports...")
+        logger.info("[SCHEDULER] Running weekly demandeur reports...")
         demandeur_result = await send_weekly_demandeur_reports_service(db)
-        print("[SCHEDULER] Weekly demandeur reports result:", demandeur_result)
-    except Exception as e:
-        print("[SCHEDULER] Weekly reports failed:", str(e))
+        logger.info("[SCHEDULER] Weekly demandeur reports result=%s", demandeur_result)
+    except Exception:
+        logger.exception("[SCHEDULER] Weekly reports failed.")
     finally:
         db.close()
 
 
+def _read_int_env(name: str, default: int) -> int:
+    value = os.getenv(name)
+
+    if value is None:
+        return default
+
+    try:
+        return int(value)
+    except ValueError:
+        logger.warning("[SCHEDULER] Invalid %s=%s. Using default=%s.", name, value, default)
+        return default
+
+
+def _log_scheduler_config(
+    enabled: bool,
+    daily_hour: int,
+    daily_minute: int,
+    weekly_day: str,
+    weekly_hour: int,
+    weekly_minute: int,
+    started: bool,
+):
+    jobs = [
+        {
+            "id": job.id,
+            "next_run_time": str(getattr(job, "next_run_time", None)),
+        }
+        for job in scheduler.get_jobs()
+    ]
+
+    logger.info(
+        "[SCHEDULER] Config enabled=%s daily_hour=%s daily_minute=%s "
+        "weekly_day=%s weekly_hour=%s weekly_minute=%s jobs=%s started=%s",
+        enabled,
+        daily_hour,
+        daily_minute,
+        weekly_day,
+        weekly_hour,
+        weekly_minute,
+        jobs,
+        started,
+    )
+
+
 def start_scheduler():
     if scheduler.running:
+        logger.info("[SCHEDULER] Already running. jobs=%s", [job.id for job in scheduler.get_jobs()])
         return
 
     enabled = os.getenv("SCHEDULER_ENABLED", "false").lower() == "true"
+    daily_hour = _read_int_env("DAILY_REMINDER_HOUR", 8)
+    daily_minute = _read_int_env("DAILY_REMINDER_MINUTE", 0)
+    weekly_day = os.getenv("WEEKLY_REPORT_DAY", "mon")
+    weekly_hour = _read_int_env("WEEKLY_REPORT_HOUR", 8)
+    weekly_minute = _read_int_env("WEEKLY_REPORT_MINUTE", 30)
 
     if not enabled:
-        print("[SCHEDULER] Disabled. Set SCHEDULER_ENABLED=true to activate.")
+        logger.info("[SCHEDULER] Disabled. Set SCHEDULER_ENABLED=true to activate.")
+        _log_scheduler_config(
+            enabled,
+            daily_hour,
+            daily_minute,
+            weekly_day,
+            weekly_hour,
+            weekly_minute,
+            False,
+        )
         return
-
-    daily_hour = int(os.getenv("DAILY_REMINDER_HOUR", "8"))
-    daily_minute = int(os.getenv("DAILY_REMINDER_MINUTE", "0"))
-
-    weekly_day = os.getenv("WEEKLY_REPORT_DAY", "mon")
-    weekly_hour = int(os.getenv("WEEKLY_REPORT_HOUR", "8"))
-    weekly_minute = int(os.getenv("WEEKLY_REPORT_MINUTE", "30"))
 
     scheduler.add_job(
         lambda: run_async_job(daily_reminders_job),
@@ -93,12 +147,19 @@ def start_scheduler():
 
     scheduler.start()
 
-    print("[SCHEDULER] Started.")
-    print(f"[SCHEDULER] Daily reminders: {daily_hour:02d}:{daily_minute:02d}")
-    print(f"[SCHEDULER] Weekly reports: {weekly_day} {weekly_hour:02d}:{weekly_minute:02d}")
+    logger.info("[SCHEDULER] Started.")
+    _log_scheduler_config(
+        enabled,
+        daily_hour,
+        daily_minute,
+        weekly_day,
+        weekly_hour,
+        weekly_minute,
+        scheduler.running,
+    )
 
 
 def stop_scheduler():
     if scheduler.running:
         scheduler.shutdown()
-        print("[SCHEDULER] Stopped.")
+        logger.info("[SCHEDULER] Stopped.")

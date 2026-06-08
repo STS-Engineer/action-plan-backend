@@ -1,6 +1,6 @@
 import datetime
 
-from sqlalchemy import and_, func, or_, true
+from sqlalchemy import and_, case, func, or_, true
 
 from app.models.action import Action
 
@@ -11,10 +11,24 @@ OVERDUE_HOME_BUCKET = "overdue"
 IN_PROGRESS_HOME_BUCKET = "in_progress"
 BLOCKED_HOME_BUCKET = "blocked"
 OVERDUE_STATUSES = {"overdue", "late"}
+STATUS_ALIASES = {
+    "open": "open",
+    "pending": "open",
+    "in progress": "open",
+    "in_progress": "open",
+    "blocked": "blocked",
+    "closed": "closed",
+    "completed": "closed",
+    "complete": "closed",
+    "done": "closed",
+    "overdue": "overdue",
+    "late": "overdue",
+}
 
 
 def normalize_action_status(status: str | None) -> str:
-    return (status or "").strip().lower()
+    normalized = (status or "").strip().lower()
+    return STATUS_ALIASES.get(normalized, normalized)
 
 
 def is_action_hidden_from_home(action, today: datetime.date | None = None) -> bool:
@@ -72,7 +86,14 @@ def get_action_active_predicate(action_like=Action):
 
 def get_normalized_action_status_expression(action_like=Action):
     status_col = _get_action_column(action_like, "status")
-    return func.lower(func.coalesce(status_col, ""))
+    raw_status = func.lower(func.trim(func.coalesce(status_col, "")))
+
+    return case(
+        (raw_status.in_(["pending", "in progress", "in_progress"]), "open"),
+        (raw_status.in_(["completed", "complete", "done"]), CLOSED_HOME_BUCKET),
+        (raw_status == "late", OVERDUE_HOME_BUCKET),
+        else_=raw_status,
+    )
 
 
 def get_action_hidden_from_home_predicate(action_like=Action):
