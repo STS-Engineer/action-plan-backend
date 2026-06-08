@@ -8,11 +8,12 @@ from app.services.action_requester_scope_service import (
     get_logged_user_requester_aliases,
 )
 from app.services.action_status_logic_service import get_action_active_predicate
+from app.services.auth_service import is_admin_role
 from app.services.directory_service import get_underlings_until_depth
 
 
 TEAM_ACTIONS_MAX_DEPTH = 2
-SUPPORTED_SEARCH_SCOPES = {"my", "team", "requested_by_me"}
+SUPPORTED_SEARCH_SCOPES = {"my", "team", "requested_by_me", "all"}
 
 
 def get_team_scope_emails(directory_db, email: str | None) -> list[str]:
@@ -49,6 +50,7 @@ async def search_actions_service(
     email: str | None = None,
     scope: str | None = None,
     directory_db=None,
+    user_role: str | None = None,
 ):
     if not query or query.strip() == "":
         return []
@@ -60,6 +62,12 @@ async def search_actions_service(
 
     if (email or scope) and normalized_scope not in SUPPORTED_SEARCH_SCOPES:
         return []
+
+    if normalized_scope is None:
+        if not normalized_email:
+            return []
+
+        normalized_scope = "my"
 
     filters = [
         get_action_active_predicate(Action),
@@ -74,6 +82,12 @@ async def search_actions_service(
             Action.urgency.ilike(search),
         )
     ]
+
+    if normalized_scope == "all":
+        if not is_admin_role(user_role):
+            return []
+
+        normalized_scope = None
 
     if normalized_scope == "my":
         if not normalized_email:

@@ -2,7 +2,7 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 from app.models.action import Action
 from app.models.sujet import Sujet
-from sqlalchemy import and_, case, func, or_
+from sqlalchemy import and_, case, func, or_, true
 import datetime
 from app.models.action_attachment import ActionAttachment
 from app.models.action_status_comment import ActionStatusComment
@@ -19,6 +19,7 @@ from app.services.action_requester_scope_service import (
     build_requester_scope_predicate,
     get_logged_user_requester_aliases,
 )
+from app.services.auth_service import is_admin, is_admin_role
 from app.services.action_status_logic_service import (
     get_action_active_predicate,
     get_action_home_bucket,
@@ -32,7 +33,7 @@ from app.services.action_status_logic_service import (
 
 ACTION_DELETE_FORBIDDEN_MESSAGE = "You can only delete actions you own or manage."
 TEAM_ACTIONS_MAX_DEPTH = 2
-SUPPORTED_ACTION_SCOPES = {"my", "team", "requested_by_me"}
+SUPPORTED_ACTION_SCOPES = {"my", "team", "requested_by_me", "all"}
 
 def get_latest_action_history_map(db: Session, action_ids):
     unique_action_ids = list({action_id for action_id in action_ids if action_id is not None})
@@ -278,9 +279,16 @@ def build_action_scope_filter(
     scope: str,
     directory_db,
     requester_values: list[str] | None = None,
+    user_role: str | None = None,
 ):
     email_responsable = func.lower(func.coalesce(action_like.email_responsable, ""))
     normalized_scope = normalize_action_scope(scope)
+
+    if normalized_scope == "all":
+        if not is_admin_role(user_role):
+            return None
+
+        return true()
 
     if normalized_scope == "team":
         underling_emails = get_team_scope_action_emails(normalized_email, directory_db)
@@ -307,10 +315,52 @@ def get_flat_action_canonical_status(action) -> str | None:
 
     normalized_status = normalize_action_status(getattr(action, "status", None))
 
-    if normalized_status in {"open", "blocked"}:
+    if normalized_status in {"open", "blocked", "closed"}:
         return normalized_status
 
     return status_bucket
+
+
+def get_admin_all_status_predicate(status: str, action_like=Action):
+    normalized_status = (status or "all").strip().lower()
+    normalized_action_status = get_normalized_action_status_expression(action_like)
+
+    if normalized_status == "all":
+        return get_action_active_predicate(action_like)
+
+    if normalized_status == "closed":
+        return and_(
+            get_action_active_predicate(action_like),
+            normalized_action_status == "closed",
+        )
+
+    if normalized_status in {"overdue", "late"}:
+        return and_(
+            get_action_active_predicate(action_like),
+            or_(
+                normalized_action_status.in_(["overdue", "late"]),
+                and_(
+                    action_like.due_date.isnot(None),
+                    action_like.due_date < func.current_date(),
+                    normalized_action_status != "closed",
+                ),
+            ),
+        )
+
+    if normalized_status == "in_progress":
+        return and_(
+            get_action_active_predicate(action_like),
+            normalized_action_status.in_(["open", "blocked"]),
+            ~get_admin_all_status_predicate("overdue", action_like),
+        )
+
+    if normalized_status == "blocked":
+        return and_(
+            get_action_active_predicate(action_like),
+            normalized_action_status == "blocked",
+        )
+
+    return get_action_home_bucket_predicate(normalized_status, action_like)
 
 
 async def get_filtered_actions_service(
@@ -319,6 +369,7 @@ async def get_filtered_actions_service(
     status: str,
     db: Session,
     directory_db,
+    user_role: str | None = None,
 ):
     normalized_email = normalize_access_email(email)
     normalized_scope = (scope or "my").strip().lower()
@@ -333,7 +384,11 @@ async def get_filtered_actions_service(
     if normalized_status not in {"all", "closed", "in_progress", "overdue", "blocked"}:
         raise HTTPException(status_code=400, detail="Invalid status")
 
-    if normalized_status == "in_progress":
+    admin_all_scope = normalized_scope == "all" and is_admin_role(user_role)
+
+    if admin_all_scope:
+        status_predicate = get_admin_all_status_predicate(normalized_status, Action)
+    elif normalized_status == "in_progress":
         normalized_action_status = get_normalized_action_status_expression(Action)
         status_predicate = and_(
             get_action_visible_from_home_predicate(Action),
@@ -358,6 +413,7 @@ async def get_filtered_actions_service(
             if normalized_scope == "requested_by_me"
             else None
         ),
+        user_role=user_role,
     )
 
     if scope_filter is None:
@@ -415,12 +471,14 @@ async def get_actions_by_sujet_id_service(
     scope: str | None = None,
     directory_db=None,
     status: str | None = None,
+    user_role: str | None = None,
 ):
     normalized_email = normalize_access_email(email)
+    admin_all_scope = normalize_action_scope(scope) == "all" and is_admin_role(user_role)
     action_visibility_predicate = (
-        get_action_visible_from_home_predicate(Action)
-        if normalized_email
-        else get_action_active_predicate(Action)
+        get_action_active_predicate(Action)
+        if admin_all_scope or not normalized_email
+        else get_action_visible_from_home_predicate(Action)
     )
     filters = [
         Action.sujet_id == sujet_id,
@@ -438,6 +496,7 @@ async def get_actions_by_sujet_id_service(
                 if normalize_action_scope(scope) == "requested_by_me"
                 else None
             ),
+            user_role=user_role,
         )
 
         if scope_filter is None:
@@ -446,7 +505,11 @@ async def get_actions_by_sujet_id_service(
         filters.append(scope_filter)
 
     if status:
-        filters.append(get_action_home_bucket_predicate(status, Action))
+        filters.append(
+            get_admin_all_status_predicate(status, Action)
+            if admin_all_scope
+            else get_action_home_bucket_predicate(status, Action)
+        )
 
     actions = (
         db.query(Action)
@@ -479,7 +542,12 @@ async def get_actions_by_sujet_id_service(
     return result
 
 
-async def get_action_by_id_service(action_id: int, db: Session):
+async def get_action_by_id_service(
+    action_id: int,
+    db: Session,
+    directory_db=None,
+    current_user=None,
+):
     action = (
         db.query(Action)
         .filter(Action.id == action_id)
@@ -489,6 +557,17 @@ async def get_action_by_id_service(action_id: int, db: Session):
 
     if not action:
         raise HTTPException(status_code=404, detail="Action not found")
+
+    if current_user is not None:
+        access = can_access_action(
+            normalize_access_email(getattr(current_user, "email", None)),
+            action,
+            directory_db,
+            user_role=getattr(current_user, "role", None),
+        )
+
+        if not access["allowed"]:
+            raise HTTPException(status_code=403, detail="Forbidden")
 
     sujet = db.query(Sujet).filter(Sujet.id == action.sujet_id).first()
     root_sujet = sujet
@@ -505,7 +584,33 @@ async def get_action_by_id_service(action_id: int, db: Session):
     )
 
 
-async def get_sous_actions_by_action_id_service(action_id: int, db: Session):
+async def get_sous_actions_by_action_id_service(
+    action_id: int,
+    db: Session,
+    directory_db=None,
+    current_user=None,
+):
+    if current_user is not None:
+        parent_action = (
+            db.query(Action)
+            .filter(Action.id == action_id)
+            .filter(get_action_active_predicate(Action))
+            .first()
+        )
+
+        if not parent_action:
+            raise HTTPException(status_code=404, detail="Action not found")
+
+        access = can_access_action(
+            normalize_access_email(getattr(current_user, "email", None)),
+            parent_action,
+            directory_db,
+            user_role=getattr(current_user, "role", None),
+        )
+
+        if not access["allowed"]:
+            raise HTTPException(status_code=403, detail="Forbidden")
+
     sous_actions = (
         db.query(Action)
         .filter(Action.parent_action_id == action_id)
@@ -578,6 +683,8 @@ async def update_action_status_service(
     db: Session,
     comment: str | None = None,
     created_by: str | None = None,
+    directory_db=None,
+    current_user=None,
 ):
     action = (
         db.query(Action)
@@ -588,6 +695,17 @@ async def update_action_status_service(
 
     if not action:
         raise HTTPException(status_code=404, detail="Action not found")
+
+    if current_user is not None:
+        access = can_access_action(
+            normalize_access_email(getattr(current_user, "email", None)),
+            action,
+            directory_db,
+            user_role=getattr(current_user, "role", None),
+        )
+
+        if not access["allowed"]:
+            raise HTTPException(status_code=403, detail="Forbidden")
 
     old_status = action.status
     normalized_status = normalize_action_status(status) or "open"
@@ -612,6 +730,18 @@ async def update_action_status_service(
     )
 
     db.add(status_comment)
+
+    if current_user is not None and is_admin(current_user):
+        log_action_event(
+            db=db,
+            action_id=action.id,
+            event_type="admin_status_changed",
+            old_value=old_status,
+            new_value=normalized_status,
+            details=f"Admin changed action status from {old_status} to {normalized_status}.",
+            created_by=normalize_access_email(getattr(current_user, "email", None)),
+        )
+
     db.commit()
     db.refresh(action)
 
@@ -635,7 +765,33 @@ async def update_action_status_service(
     return payload
 
 
-async def get_action_status_comments_service(action_id: int, db: Session):
+async def get_action_status_comments_service(
+    action_id: int,
+    db: Session,
+    directory_db=None,
+    current_user=None,
+):
+    if current_user is not None:
+        action = (
+            db.query(Action)
+            .filter(Action.id == action_id)
+            .filter(get_action_active_predicate(Action))
+            .first()
+        )
+
+        if not action:
+            raise HTTPException(status_code=404, detail="Action not found")
+
+        access = can_access_action(
+            normalize_access_email(getattr(current_user, "email", None)),
+            action,
+            directory_db,
+            user_role=getattr(current_user, "role", None),
+        )
+
+        if not access["allowed"]:
+            raise HTTPException(status_code=403, detail="Forbidden")
+
     comments = (
         db.query(ActionStatusComment)
         .filter(ActionStatusComment.action_id == action_id)
@@ -774,6 +930,48 @@ def _collect_active_action_subtree_ids(action_id: int, db: Session) -> list[int]
     return collected_ids
 
 
+def _collect_action_subtree_ids(action_id: int, db: Session) -> list[int]:
+    collected_ids: list[int] = []
+    seen_ids: set[int] = set()
+    pending_ids = [action_id]
+
+    while pending_ids:
+        current_ids = [
+            pending_id
+            for pending_id in pending_ids
+            if pending_id not in seen_ids
+        ]
+
+        if not current_ids:
+            break
+
+        actions = (
+            db.query(Action.id)
+            .filter(Action.id.in_(current_ids))
+            .all()
+        )
+        action_ids = [action.id for action in actions]
+
+        for current_action_id in action_ids:
+            seen_ids.add(current_action_id)
+            collected_ids.append(current_action_id)
+
+        child_rows = (
+            db.query(Action.id)
+            .filter(Action.parent_action_id.in_(action_ids))
+            .all()
+            if action_ids
+            else []
+        )
+        pending_ids = [
+            child.id
+            for child in child_rows
+            if child.id not in seen_ids
+        ]
+
+    return collected_ids
+
+
 async def delete_action_service(
     action_id: int,
     db: Session,
@@ -836,6 +1034,52 @@ async def delete_action_service(
         "deleted_action_ids": subtree_ids,
         "count": len(subtree_ids),
         "message": "Action deleted.",
+    }
+
+
+async def restore_action_service(
+    action_id: int,
+    db: Session,
+    current_user,
+):
+    if not is_admin(current_user):
+        raise HTTPException(status_code=403, detail="Administrator access required.")
+
+    action = db.query(Action).filter(Action.id == action_id).first()
+
+    if not action:
+        raise HTTPException(status_code=404, detail="Action not found")
+
+    subtree_ids = _collect_action_subtree_ids(action.id, db)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    logged_email = normalize_access_email(getattr(current_user, "email", None))
+    actions = db.query(Action).filter(Action.id.in_(subtree_ids)).all()
+
+    for subtree_action in actions:
+        old_value = "deleted" if subtree_action.is_deleted else "active"
+        subtree_action.is_deleted = False
+        subtree_action.deleted_at = None
+        subtree_action.deleted_by = None
+        subtree_action.updated_at = now
+
+        log_action_event(
+            db=db,
+            action_id=subtree_action.id,
+            event_type="admin_action_restored",
+            old_value=old_value,
+            new_value="active",
+            details=f"Action restored by admin {logged_email}",
+            created_by=logged_email,
+        )
+
+    db.commit()
+
+    return {
+        "restored": True,
+        "action_id": action_id,
+        "restored_action_ids": subtree_ids,
+        "count": len(subtree_ids),
+        "message": "Action restored.",
     }
 
 

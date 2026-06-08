@@ -13,6 +13,7 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer()
 ACCESS_TOKEN_USE = "access"
 REFRESH_TOKEN_USE = "refresh"
+SUPPORTED_USER_ROLES = {"user", "manager", "admin"}
 
 
 def get_jwt_secret_key():
@@ -42,6 +43,27 @@ def get_access_token_expires_in_seconds():
 
 def normalize_email(email: str):
     return email.strip().lower()
+
+
+def normalize_user_role(role: str | None) -> str:
+    normalized_role = str(role or "user").strip().lower()
+
+    if normalized_role in SUPPORTED_USER_ROLES:
+        return normalized_role
+
+    return "user"
+
+
+def is_admin(user) -> bool:
+    return normalize_user_role(getattr(user, "role", None)) == "admin"
+
+
+def is_manager(user) -> bool:
+    return normalize_user_role(getattr(user, "role", None)) in {"manager", "admin"}
+
+
+def is_admin_role(role: str | None) -> bool:
+    return normalize_user_role(role) == "admin"
 
 
 def hash_password(password: str):
@@ -88,7 +110,7 @@ def build_token_payload(user: User):
     return {
         "sub": user.email,
         "user_id": user.id,
-        "role": user.role,
+        "role": normalize_user_role(user.role),
     }
 
 
@@ -107,7 +129,7 @@ def build_auth_response(user: User, include_refresh_token: bool = True):
         "id": user.id,
         "email": user.email,
         "full_name": user.full_name,
-        "role": user.role,
+        "role": normalize_user_role(user.role),
     }
 
     return response
@@ -148,7 +170,7 @@ def register_user_service(payload, db, directory_db):
         "id": user.id,
         "email": user.email,
         "full_name": user.full_name,
-        "role": user.role,
+        "role": normalize_user_role(user.role),
     }
 
 
@@ -228,3 +250,10 @@ def get_current_user(
 
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid or expired token.")
+
+
+def require_admin_user(current_user: User = Depends(get_current_user)):
+    if not is_admin(current_user):
+        raise HTTPException(status_code=403, detail="Administrator access required.")
+
+    return current_user

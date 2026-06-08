@@ -7,6 +7,7 @@ from app.schema.authSchema import LoginSchema, RefreshTokenSchema, RegisterSchem
 from app.services.auth_service import (
     get_current_user,
     login_user_service,
+    normalize_user_role,
     refresh_access_token_service,
     register_user_service,
 )
@@ -45,5 +46,5 @@ async def me(current_user: User = Depends(get_current_user)):
         "id": current_user.id,
         "email": current_user.email,
         "full_name": current_user.full_name,
-        "role": current_user.role,
+        "role": normalize_user_role(current_user.role),
     }

@@ -15,9 +15,10 @@ from app.services.action_status_logic_service import (
     get_action_home_bucket,
 )
 from app.services.directory_service import get_all_underlings, normalize_email
+from app.services.auth_service import is_admin_role
 
 
-SUPPORTED_SCOPES = {"my", "team", "global"}
+SUPPORTED_SCOPES = {"my", "team", "global", "all"}
 SUPPORTED_CHART_KEYS = {
     "priority_distribution",
     "status_distribution",
@@ -127,11 +128,41 @@ def get_members_by_email(directory_db: Session):
     }
 
 
-def get_actions_for_scope(db: Session, directory_db: Session, email: str | None, scope: str):
+def normalize_dashboard_scope(scope: str | None) -> str:
+    normalized_scope = (scope or "my").strip().lower()
+
+    if normalized_scope == "global":
+        return "all"
+
+    if normalized_scope not in SUPPORTED_SCOPES:
+        return "my"
+
+    return normalized_scope
+
+
+def get_dashboard_supported_scopes(user_role: str | None):
+    scopes = ["my", "team"]
+
+    if is_admin_role(user_role):
+        scopes.append("all")
+
+    return scopes
+
+
+def get_actions_for_scope(
+    db: Session,
+    directory_db: Session,
+    email: str | None,
+    scope: str,
+    user_role: str | None = None,
+):
     normalized_email = normalize_email(email)
     active_query = db.query(Action).filter(get_action_active_predicate(Action))
 
-    if scope == "global":
+    if scope == "all":
+        if not is_admin_role(user_role):
+            return []
+
         return active_query.all()
 
     if not normalized_email:
@@ -204,6 +235,8 @@ def serialize_drilldown_action(action, bucket):
         "priority_index": action.priority_index,
         "responsable": action.responsable,
         "email_responsable": action.email_responsable,
+        "demandeur": action.demandeur,
+        "email_demandeur": action.email_demandeur,
         "due_date": action.due_date.isoformat() if action.due_date else None,
         "topic_path": build_topic_path(action.sujet),
     }
@@ -253,16 +286,21 @@ async def get_dashboard_overview_service(
     db: Session,
     directory_db: Session,
     email: str | None = None,
-    scope: str = "global",
+    scope: str = "my",
+    user_role: str | None = None,
 ):
-    normalized_scope = (scope or "global").strip().lower()
-
-    if normalized_scope not in SUPPORTED_SCOPES:
-        normalized_scope = "global"
+    normalized_scope = normalize_dashboard_scope(scope)
 
     today = date.today()
-    actions = get_actions_for_scope(db, directory_db, email, normalized_scope)
+    actions = get_actions_for_scope(
+        db,
+        directory_db,
+        email,
+        normalized_scope,
+        user_role=user_role,
+    )
     members_by_email = get_members_by_email(directory_db)
+    include_all_active_actions = normalized_scope == "all" and is_admin_role(user_role)
 
     visible_actions = []
     top_critical_actions = []
@@ -287,7 +325,10 @@ async def get_dashboard_overview_service(
         bucket = get_action_home_bucket(action, today)
 
         if bucket is None:
-            continue
+            if include_all_active_actions and str(action.status or "").strip().lower() == CLOSED_HOME_BUCKET:
+                bucket = CLOSED_HOME_BUCKET
+            else:
+                continue
 
         responsible_email = action.email_responsable.lower() if action.email_responsable else None
         member = members_by_email.get(responsible_email) if responsible_email else None
@@ -336,7 +377,7 @@ async def get_dashboard_overview_service(
 
     return {
         "scope": normalized_scope,
-        "supported_scopes": ["my", "team", "global"],
+        "supported_scopes": get_dashboard_supported_scopes(user_role),
         "generated_at": date.today().isoformat(),
         "global": {
             "total_actions": len(visible_actions),
@@ -379,12 +420,10 @@ async def get_dashboard_drilldown_service(
     scope: str,
     chart: str,
     bucket: str,
+    user_role: str | None = None,
 ):
-    normalized_scope = (scope or "global").strip().lower()
+    normalized_scope = normalize_dashboard_scope(scope)
     normalized_chart = (chart or "").strip().lower()
-
-    if normalized_scope not in SUPPORTED_SCOPES:
-        normalized_scope = "global"
 
     if normalized_chart not in SUPPORTED_CHART_KEYS:
         return {
@@ -395,9 +434,16 @@ async def get_dashboard_drilldown_service(
         }
 
     today = date.today()
-    actions = get_actions_for_scope(db, directory_db, email, normalized_scope)
+    actions = get_actions_for_scope(
+        db,
+        directory_db,
+        email,
+        normalized_scope,
+        user_role=user_role,
+    )
     members_by_email = get_members_by_email(directory_db)
     drilldown_actions = []
+    include_all_active_actions = normalized_scope == "all" and is_admin_role(user_role)
 
     for action in actions:
         enrich_action_priority(action)
@@ -405,7 +451,10 @@ async def get_dashboard_drilldown_service(
         status_bucket = get_action_home_bucket(action, today)
 
         if status_bucket is None:
-            continue
+            if include_all_active_actions and str(action.status or "").strip().lower() == CLOSED_HOME_BUCKET:
+                status_bucket = CLOSED_HOME_BUCKET
+            else:
+                continue
 
         responsible_email = action.email_responsable.lower() if action.email_responsable else None
         member = members_by_email.get(responsible_email) if responsible_email else None

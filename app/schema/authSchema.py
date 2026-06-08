@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel, EmailStr
 
 
@@ -20,3 +22,8 @@ class TokenResponseSchema(BaseModel):
     refresh_token: str | None = None
     token_type: str = "bearer"
     expires_in: int
+
+
+class AdminPromoteUserSchema(BaseModel):
+    email: EmailStr
+    role: Literal["user", "manager", "admin"] = "admin"

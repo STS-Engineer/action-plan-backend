@@ -1,5 +1,6 @@
 import os
 
+from app.services.auth_service import is_admin_role
 from app.services.directory_service import get_all_underlings
 
 
@@ -19,8 +20,7 @@ def is_enabled(value: str | None, default: bool = True) -> bool:
 
 
 def can_access_global_actions(user_role: str | None) -> bool:
-    normalized_role = str(user_role or "").strip().lower()
-    return normalized_role in {"admin", "global", "superadmin", "super_admin"}
+    return is_admin_role(user_role)
 
 
 def can_access_action(
@@ -130,5 +130,12 @@ def action_access_summary(action):
         "id": action.id,
         "titre": action.titre,
         "status": action.status,
+        "responsable": action.responsable,
         "email_responsable": action.email_responsable,
+        "demandeur": action.demandeur,
+        "email_demandeur": action.email_demandeur,
+        "priority_index": action.priority_index,
+        "importance": action.importance,
+        "urgency": action.urgency,
+        "escalation_level": action.escalation_level,
     }

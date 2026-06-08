@@ -1,6 +1,6 @@
 from app.models.sujet import Sujet
 from app.models.action import Action
-from sqlalchemy import case, func, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.orm import Session, aliased
 
 from app.services.action_requester_scope_service import (
@@ -9,6 +9,7 @@ from app.services.action_requester_scope_service import (
     normalize_requester_value,
     unique_requester_values,
 )
+from app.services.auth_service import is_admin_role
 from app.services.action_status_logic_service import (
     get_action_active_predicate,
     get_action_blocked_predicate,
@@ -22,7 +23,7 @@ from app.services.action_status_logic_service import (
 
 
 TEAM_ACTIONS_MAX_DEPTH = 2
-SUPPORTED_HOME_SCOPES = {"my", "team", "requested_by_me"}
+SUPPORTED_HOME_SCOPES = {"my", "team", "requested_by_me", "all"}
 
 ZERO_HOME_SUMMARY = {
     "total_sujets": 0,
@@ -124,9 +125,16 @@ def build_visible_scoped_actions_subquery(
     requester_email: str | None = None,
     requester_values: list[str] | None = None,
     sujet_tree=None,
+    include_hidden_closed: bool = False,
 ):
     if sujet_tree is None:
         sujet_tree = build_sujet_tree_cte()
+
+    visibility_predicate = (
+        get_action_active_predicate(Action)
+        if include_hidden_closed
+        else get_action_visible_from_home_predicate(Action)
+    )
 
     query = (
         select(
@@ -139,7 +147,7 @@ def build_visible_scoped_actions_subquery(
         )
         .select_from(sujet_tree)
         .join(Action, Action.sujet_id == sujet_tree.c.sujet_id)
-        .where(get_action_visible_from_home_predicate(Action))
+        .where(visibility_predicate)
     )
 
     scope_predicate = build_scope_predicate(
@@ -156,7 +164,49 @@ def build_visible_scoped_actions_subquery(
     return query.subquery()
 
 
-def build_root_action_stats_subquery(scoped_actions):
+def get_scoped_closed_predicate(scoped_actions, include_hidden_closed: bool = False):
+    if include_hidden_closed:
+        return get_normalized_action_status_expression(scoped_actions) == "closed"
+
+    return get_action_closed_visible_predicate(scoped_actions)
+
+
+def get_scoped_overdue_predicate(scoped_actions, include_hidden_closed: bool = False):
+    if include_hidden_closed:
+        status_expr = get_normalized_action_status_expression(scoped_actions)
+
+        return or_(
+            status_expr.in_(["overdue", "late"]),
+            (
+                (scoped_actions.c.due_date.isnot(None))
+                & (scoped_actions.c.due_date < func.current_date())
+                & (status_expr != "closed")
+            ),
+        )
+
+    return get_action_overdue_predicate(scoped_actions)
+
+
+def get_scoped_in_progress_predicate(scoped_actions, include_hidden_closed: bool = False):
+    if include_hidden_closed:
+        status_expr = get_normalized_action_status_expression(scoped_actions)
+
+        return and_(
+            status_expr.in_(["open", "blocked"]),
+            ~get_scoped_overdue_predicate(scoped_actions, include_hidden_closed=True),
+        )
+
+    return get_action_in_progress_predicate(scoped_actions)
+
+
+def get_scoped_blocked_predicate(scoped_actions, include_hidden_closed: bool = False):
+    if include_hidden_closed:
+        return get_normalized_action_status_expression(scoped_actions) == "blocked"
+
+    return get_action_blocked_predicate(scoped_actions)
+
+
+def build_root_action_stats_subquery(scoped_actions, include_hidden_closed: bool = False):
     return (
         select(
             scoped_actions.c.root_id.label("root_id"),
@@ -164,28 +214,28 @@ def build_root_action_stats_subquery(scoped_actions):
             func.count(
                 func.distinct(
                     case(
-                        (get_action_closed_visible_predicate(scoped_actions), scoped_actions.c.action_id),
+                        (get_scoped_closed_predicate(scoped_actions, include_hidden_closed), scoped_actions.c.action_id),
                     )
                 )
             ).label("completed_actions"),
             func.count(
                 func.distinct(
                     case(
-                        (get_action_overdue_predicate(scoped_actions), scoped_actions.c.action_id),
+                        (get_scoped_overdue_predicate(scoped_actions, include_hidden_closed), scoped_actions.c.action_id),
                     )
                 )
             ).label("overdue_actions"),
             func.count(
                 func.distinct(
                     case(
-                        (get_action_in_progress_predicate(scoped_actions), scoped_actions.c.action_id),
+                        (get_scoped_in_progress_predicate(scoped_actions, include_hidden_closed), scoped_actions.c.action_id),
                     )
                 )
             ).label("in_progress_actions"),
             func.count(
                 func.distinct(
                     case(
-                        (get_action_blocked_predicate(scoped_actions), scoped_actions.c.action_id),
+                        (get_scoped_blocked_predicate(scoped_actions, include_hidden_closed), scoped_actions.c.action_id),
                     )
                 )
             ).label("blocked_actions"),
@@ -196,11 +246,26 @@ def build_root_action_stats_subquery(scoped_actions):
     )
 
 
-def build_matching_root_ids_query(scoped_actions, status: str | None = None):
+def build_matching_root_ids_query(
+    scoped_actions,
+    status: str | None = None,
+    include_hidden_closed: bool = False,
+):
     query = select(scoped_actions.c.root_id).select_from(scoped_actions)
 
     if status:
-        query = query.where(get_action_home_bucket_predicate(status, scoped_actions))
+        normalized_status = str(status or "").strip().lower()
+
+        if include_hidden_closed and normalized_status == "closed":
+            query = query.where(get_scoped_closed_predicate(scoped_actions, include_hidden_closed=True))
+        elif include_hidden_closed and normalized_status in {"overdue", "late"}:
+            query = query.where(get_scoped_overdue_predicate(scoped_actions, include_hidden_closed=True))
+        elif include_hidden_closed and normalized_status == "in_progress":
+            query = query.where(get_scoped_in_progress_predicate(scoped_actions, include_hidden_closed=True))
+        elif include_hidden_closed and normalized_status == "blocked":
+            query = query.where(get_scoped_blocked_predicate(scoped_actions, include_hidden_closed=True))
+        else:
+            query = query.where(get_action_home_bucket_predicate(status, scoped_actions))
 
     return query.distinct()
 
@@ -276,13 +341,22 @@ def build_scoped_actions_for_home_scope(
     directory_db=None,
     sujet_tree=None,
     db: Session | None = None,
+    user_role: str | None = None,
 ):
     normalized_email = normalize_scope_email(email)
+    normalized_scope = normalize_home_scope(scope)
+
+    if normalized_scope == "all":
+        if not is_admin_role(user_role):
+            return None
+
+        return build_visible_scoped_actions_subquery(
+            sujet_tree=sujet_tree,
+            include_hidden_closed=True,
+        )
 
     if not normalized_email:
         return None
-
-    normalized_scope = normalize_home_scope(scope)
 
     if normalized_scope == "team":
         scope_emails = get_scope_emails_for_team(normalized_email, directory_db)
@@ -346,12 +420,15 @@ async def get_home_summary_service(
     scope: str,
     db: Session,
     directory_db,
+    user_role: str | None = None,
 ):
+    include_hidden_closed = normalize_home_scope(scope) == "all" and is_admin_role(user_role)
     scoped_actions = build_scoped_actions_for_home_scope(
         email=email,
         scope=scope,
         directory_db=directory_db,
         db=db,
+        user_role=user_role,
     )
 
     if scoped_actions is None:
@@ -364,21 +441,21 @@ async def get_home_summary_service(
             func.count(
                 func.distinct(
                     case(
-                        (get_action_closed_visible_predicate(scoped_actions), scoped_actions.c.action_id),
+                        (get_scoped_closed_predicate(scoped_actions, include_hidden_closed), scoped_actions.c.action_id),
                     )
                 )
             ).label("actions_completed"),
             func.count(
                 func.distinct(
                     case(
-                        (get_action_overdue_predicate(scoped_actions), scoped_actions.c.action_id),
+                        (get_scoped_overdue_predicate(scoped_actions, include_hidden_closed), scoped_actions.c.action_id),
                     )
                 )
             ).label("actions_overdue"),
             func.count(
                 func.distinct(
                     case(
-                        (get_action_in_progress_predicate(scoped_actions), scoped_actions.c.action_id),
+                        (get_scoped_in_progress_predicate(scoped_actions, include_hidden_closed), scoped_actions.c.action_id),
                     )
                 )
             ).label("actions_in_progress"),
@@ -389,7 +466,7 @@ async def get_home_summary_service(
             ).label("actions_open"),
             func.count(
                 func.distinct(
-                    case((get_action_blocked_predicate(scoped_actions), scoped_actions.c.action_id))
+                    case((get_scoped_blocked_predicate(scoped_actions, include_hidden_closed), scoped_actions.c.action_id))
                 )
             ).label("actions_blocked"),
         )
@@ -414,20 +491,30 @@ async def getSujetsRacineService(
     status: str | None = None,
     scope: str = "my",
     directory_db=None,
+    user_role: str | None = None,
 ):
+    include_hidden_closed = normalize_home_scope(scope) == "all" and is_admin_role(user_role)
     scoped_actions = build_scoped_actions_for_home_scope(
         email=email,
         scope=scope,
         directory_db=directory_db,
         db=db,
+        user_role=user_role,
     )
 
     if scoped_actions is None:
         return []
 
-    root_stats = build_root_action_stats_subquery(scoped_actions)
+    root_stats = build_root_action_stats_subquery(
+        scoped_actions,
+        include_hidden_closed=include_hidden_closed,
+    )
     direct_child_counts = build_direct_child_count_subquery()
-    matching_root_ids_query = build_matching_root_ids_query(scoped_actions, status=status)
+    matching_root_ids_query = build_matching_root_ids_query(
+        scoped_actions,
+        status=status,
+        include_hidden_closed=include_hidden_closed,
+    )
 
     sujets_racine = (
         db.query(
@@ -476,7 +563,9 @@ async def get_sous_sujets_by_sujet_id_service(
     scope: str | None = None,
     directory_db=None,
     status: str | None = None,
+    user_role: str | None = None,
 ):
+    include_hidden_closed = normalize_home_scope(scope) == "all" and is_admin_role(user_role)
     if not email:
         sous_sujets = (
             db.query(Sujet)
@@ -493,14 +582,22 @@ async def get_sous_sujets_by_sujet_id_service(
         directory_db=directory_db,
         sujet_tree=sujet_tree,
         db=db,
+        user_role=user_role,
     )
 
     if scoped_actions is None:
         return []
 
-    root_stats = build_root_action_stats_subquery(scoped_actions)
+    root_stats = build_root_action_stats_subquery(
+        scoped_actions,
+        include_hidden_closed=include_hidden_closed,
+    )
     direct_child_counts = build_direct_child_count_subquery()
-    matching_root_ids_query = build_matching_root_ids_query(scoped_actions, status=status)
+    matching_root_ids_query = build_matching_root_ids_query(
+        scoped_actions,
+        status=status,
+        include_hidden_closed=include_hidden_closed,
+    )
 
     sous_sujets = (
         db.query(
@@ -547,20 +644,30 @@ async def get_team_sujets_racine_service(
     db: Session,
     directory_db,
     status: str | None = None,
+    user_role: str | None = None,
 ):
+    include_hidden_closed = False
     scoped_actions = build_scoped_actions_for_home_scope(
         email=email,
         scope="team",
         directory_db=directory_db,
         db=db,
+        user_role=user_role,
     )
 
     if scoped_actions is None:
         return []
 
-    root_stats = build_root_action_stats_subquery(scoped_actions)
+    root_stats = build_root_action_stats_subquery(
+        scoped_actions,
+        include_hidden_closed=include_hidden_closed,
+    )
     direct_child_counts = build_direct_child_count_subquery()
-    matching_root_ids_query = build_matching_root_ids_query(scoped_actions, status=status)
+    matching_root_ids_query = build_matching_root_ids_query(
+        scoped_actions,
+        status=status,
+        include_hidden_closed=include_hidden_closed,
+    )
 
     sujets_racine = (
         db.query(

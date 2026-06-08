@@ -16,7 +16,9 @@ from app.services.azure_blob_service import (
     upload_action_attachment_blob,
 )
 from app.services.action_access_service import can_access_action
+from app.services.action_event_log_service import log_action_event
 from app.services.action_status_logic_service import get_action_active_predicate
+from app.services.auth_service import is_admin
 from app.services.action_attachment_security_service import (
     assert_path_under_upload_root,
     sanitize_original_filename,
@@ -49,6 +51,28 @@ def attachment_to_dict(attachment: ActionAttachment):
         "uploaded_by": attachment.uploaded_by,
         "created_at": attachment.created_at,
     }
+
+
+def log_admin_attachment_download(
+    db: Session,
+    action_id: int,
+    attachment_id: int,
+    logged_user_email: str | None,
+    current_user=None,
+):
+    if current_user is None or not is_admin(current_user):
+        return
+
+    log_action_event(
+        db=db,
+        action_id=action_id,
+        event_type="admin_attachment_downloaded",
+        old_value=None,
+        new_value=str(attachment_id),
+        details=f"Admin downloaded attachment {attachment_id}.",
+        created_by=logged_user_email,
+    )
+    db.commit()
 
 
 async def upload_action_attachment_service(
@@ -154,9 +178,15 @@ async def upload_action_attachment_service(
     return attachment_to_dict(attachment)
 
 
-async def get_action_attachments_service(action_id: int, db: Session):
+async def get_action_attachments_service(
+    action_id: int,
+    db: Session,
+    logged_user_email: str | None = None,
+    directory_db=None,
+    current_user=None,
+):
     action = (
-        db.query(Action.id)
+        db.query(Action)
         .filter(Action.id == action_id)
         .filter(get_action_active_predicate(Action))
         .first()
@@ -164,6 +194,20 @@ async def get_action_attachments_service(action_id: int, db: Session):
 
     if not action:
         return []
+
+    if current_user is not None:
+        access = can_access_action(
+            logged_user_email,
+            action,
+            directory_db,
+            user_role=getattr(current_user, "role", None),
+        )
+
+        if not access["allowed"]:
+            raise HTTPException(
+                status_code=403,
+                detail="You do not have permission to access this attachment.",
+            )
 
     attachments = (
         db.query(ActionAttachment)
@@ -255,8 +299,18 @@ async def download_action_attachment_service(
         if not exists:
             raise HTTPException(status_code=404, detail=ATTACHMENT_FILE_NOT_FOUND_MESSAGE)
 
+        download_url = generate_blob_download_url(attachment.file_path, verify_exists=False)
+
+        log_admin_attachment_download(
+            db=db,
+            action_id=action.id,
+            attachment_id=attachment.id,
+            logged_user_email=logged_user_email,
+            current_user=current_user,
+        )
+
         return {
-            "download_url": generate_blob_download_url(attachment.file_path, verify_exists=False),
+            "download_url": download_url,
             "file_name": attachment.file_name,
         }
 
@@ -288,6 +342,14 @@ async def download_action_attachment_service(
     )
 
     media_type = mimetypes.guess_type(attachment.file_name)[0] or "application/octet-stream"
+
+    log_admin_attachment_download(
+        db=db,
+        action_id=action.id,
+        attachment_id=attachment.id,
+        logged_user_email=logged_user_email,
+        current_user=current_user,
+    )
 
     return FileResponse(
         path=file_path,
