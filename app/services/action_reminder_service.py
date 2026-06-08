@@ -5,7 +5,11 @@ from html import escape
 from fastapi import HTTPException
 from sqlalchemy import func
 from app.models.action import Action
-from app.services.email_service import get_smtp_config_diagnostics, send_email
+from app.services.email_service import (
+    get_smtp_config_diagnostics,
+    send_email,
+    send_email_with_diagnostics,
+)
 from app.services.action_priority_service import enrich_action_priority
 from app.services.action_status_logic_service import (
     get_action_active_predicate,
@@ -778,11 +782,12 @@ async def run_daily_grouped_reminders_service(
             len(included_actions),
         )
 
-        sent = send_email(
+        send_result = send_email_with_diagnostics(
             to_email=send_to,
             subject=subject,
             html_body=html_body,
         )
+        sent = bool(send_result.get("success"))
 
         if sent:
             now = datetime.datetime.now(datetime.timezone.utc)
@@ -805,6 +810,12 @@ async def run_daily_grouped_reminders_service(
             {
                 "email": responsable_email,
                 "message": "SMTP send failed",
+                "error_type": send_result.get("error_type"),
+                "error_detail": send_result.get("error_detail"),
+                "smtp_code": send_result.get("smtp_code"),
+                "smtp_response": send_result.get("smtp_response"),
+                "diagnostics": send_result.get("diagnostics"),
+                "suggestion": send_result.get("suggestion"),
             }
         )
         logger.error(

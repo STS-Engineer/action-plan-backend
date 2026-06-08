@@ -10,7 +10,7 @@ from app.services.action_reminder_service import (
     run_daily_grouped_reminders_service,
 )
 from app.services.auth_service import normalize_email, require_admin_user
-from app.services.email_service import get_smtp_config_diagnostics
+from app.services.email_service import get_smtp_config_diagnostics, send_smtp_test_email
 
 
 router = APIRouter(prefix="/api/admin", tags=["Admin"])
@@ -19,6 +19,10 @@ router = APIRouter(prefix="/api/admin", tags=["Admin"])
 class DailyReminderRunRequest(BaseModel):
     dry_run: bool = True
     test_email: EmailStr | None = None
+
+
+class SmtpTestRequest(BaseModel):
+    to_email: EmailStr
 
 
 @router.post("/promote-user")
@@ -74,3 +78,11 @@ async def getSmtpConfig(
     current_user: User = Depends(require_admin_user),
 ):
     return get_smtp_config_diagnostics()
+
+
+@router.post("/reminders/smtp-test")
+async def runSmtpTest(
+    payload: SmtpTestRequest,
+    current_user: User = Depends(require_admin_user),
+):
+    return send_smtp_test_email(str(payload.to_email))
