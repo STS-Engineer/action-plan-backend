@@ -11,6 +11,7 @@ from app.services.action_reminder_service import (
 )
 from app.services.auth_service import normalize_email, require_admin_user
 from app.services.email_service import get_smtp_config_diagnostics, send_smtp_test_email
+from app.services.scheduler_service import get_scheduler_status, reload_scheduler
 
 
 router = APIRouter(prefix="/api/admin", tags=["Admin"])
@@ -86,3 +87,17 @@ async def runSmtpTest(
     current_user: User = Depends(require_admin_user),
 ):
     return send_smtp_test_email(str(payload.to_email))
+
+
+@router.get("/scheduler/status")
+async def getSchedulerStatus(
+    current_user: User = Depends(require_admin_user),
+):
+    return get_scheduler_status()
+
+
+@router.post("/scheduler/reload")
+async def reloadScheduler(
+    current_user: User = Depends(require_admin_user),
+):
+    return reload_scheduler()
