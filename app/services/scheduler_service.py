@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from sqlalchemy import text
 
 from app.config.database import SessionLocal
 from app.services.action_overdue_service import update_overdue_actions_service
@@ -20,6 +21,8 @@ from app.services.weekly_report_service import (
 DEFAULT_SCHEDULER_TIMEZONE = "Africa/Tunis"
 DAILY_REMINDER_JOB_ID = "daily_action_plan_reminders"
 WEEKLY_REPORT_JOB_ID = "weekly_action_plan_reports"
+DAILY_REMINDER_LOCK_KEY = 7291001001
+WEEKLY_REPORT_LOCK_KEY = 7291001002
 
 logger = logging.getLogger(__name__)
 scheduler = BackgroundScheduler(timezone=ZoneInfo(DEFAULT_SCHEDULER_TIMEZONE))
@@ -31,46 +34,99 @@ def run_async_job(async_func):
     asyncio.run(async_func())
 
 
+def _try_acquire_job_lock(db, job_id: str, lock_key: int) -> bool:
+    acquired = bool(
+        db.execute(
+            text("SELECT pg_try_advisory_lock(:lock_key)"),
+            {"lock_key": lock_key},
+        ).scalar()
+    )
+
+    if acquired:
+        logger.info("[SCHEDULER] Advisory lock acquired job_id=%s lock_key=%s", job_id, lock_key)
+    else:
+        logger.warning("[SCHEDULER] Advisory lock not acquired; skipping job_id=%s lock_key=%s", job_id, lock_key)
+
+    return acquired
+
+
+def _release_job_lock(db, job_id: str, lock_key: int):
+    try:
+        db.rollback()
+        released = bool(
+            db.execute(
+                text("SELECT pg_advisory_unlock(:lock_key)"),
+                {"lock_key": lock_key},
+            ).scalar()
+        )
+        logger.info(
+            "[SCHEDULER] Advisory lock released job_id=%s lock_key=%s released=%s",
+            job_id,
+            lock_key,
+            released,
+        )
+    except Exception:
+        logger.exception("[SCHEDULER] Failed to release advisory lock job_id=%s lock_key=%s", job_id, lock_key)
+
+
 async def daily_reminders_job():
-    db = SessionLocal()
+    lock_db = SessionLocal()
+    job_db = SessionLocal()
+    lock_acquired = False
 
     try:
+        lock_acquired = _try_acquire_job_lock(lock_db, DAILY_REMINDER_JOB_ID, DAILY_REMINDER_LOCK_KEY)
+        if not lock_acquired:
+            return
+
         logger.info("[SCHEDULER] Executing job_id=%s", DAILY_REMINDER_JOB_ID)
         logger.info("[SCHEDULER] Updating overdue actions...")
-        overdue_result = await update_overdue_actions_service(db)
+        overdue_result = await update_overdue_actions_service(job_db)
         logger.info("[SCHEDULER] Overdue update result=%s", overdue_result)
 
         logger.info("[SCHEDULER] Recalculating priorities...")
-        priority_result = await recalculate_all_priorities_service(db)
+        priority_result = await recalculate_all_priorities_service(job_db)
         logger.info("[SCHEDULER] Priority recalculation result=%s", priority_result)
 
         logger.info("[SCHEDULER] Running daily grouped reminders...")
-        result = await send_grouped_due_date_reminders_service(db)
+        result = await send_grouped_due_date_reminders_service(job_db)
         logger.info("[SCHEDULER] Daily reminders result=%s", result)
 
     except Exception:
         logger.exception("[SCHEDULER] Daily reminders failed.")
 
     finally:
-        db.close()
+        if lock_acquired:
+            _release_job_lock(lock_db, DAILY_REMINDER_JOB_ID, DAILY_REMINDER_LOCK_KEY)
+        job_db.close()
+        lock_db.close()
 
 
 async def weekly_reports_job():
-    db = SessionLocal()
+    lock_db = SessionLocal()
+    job_db = SessionLocal()
+    lock_acquired = False
 
     try:
+        lock_acquired = _try_acquire_job_lock(lock_db, WEEKLY_REPORT_JOB_ID, WEEKLY_REPORT_LOCK_KEY)
+        if not lock_acquired:
+            return
+
         logger.info("[SCHEDULER] Executing job_id=%s", WEEKLY_REPORT_JOB_ID)
         logger.info("[SCHEDULER] Running weekly responsable reports...")
-        responsable_result = await send_weekly_responsable_reports_service(db)
+        responsable_result = await send_weekly_responsable_reports_service(job_db)
         logger.info("[SCHEDULER] Weekly responsable reports result=%s", responsable_result)
 
         logger.info("[SCHEDULER] Running weekly demandeur reports...")
-        demandeur_result = await send_weekly_demandeur_reports_service(db)
+        demandeur_result = await send_weekly_demandeur_reports_service(job_db)
         logger.info("[SCHEDULER] Weekly demandeur reports result=%s", demandeur_result)
     except Exception:
         logger.exception("[SCHEDULER] Weekly reports failed.")
     finally:
-        db.close()
+        if lock_acquired:
+            _release_job_lock(lock_db, WEEKLY_REPORT_JOB_ID, WEEKLY_REPORT_LOCK_KEY)
+        job_db.close()
+        lock_db.close()
 
 
 def _read_int_env(name: str, default: int) -> int:
