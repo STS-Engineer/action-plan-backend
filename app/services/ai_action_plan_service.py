@@ -34,6 +34,7 @@ from app.services.ia_assistant_knowledge_service import (
 from app.services.ia_responsible_resolver_service import (
     resolve_responsible_query,
 )
+from app.services.sujet_service import find_or_create_sujet_by_normalized_title
 
 
 MAX_SUJET_DEPTH = 3
@@ -1829,7 +1830,8 @@ def ingest_sujet_tree(
     created_sujet_ids: list[int],
     created_action_ids: list[int],
 ) -> Sujet:
-    sujet = Sujet(
+    sujet, _ = find_or_create_sujet_by_normalized_title(
+        db,
         code=sujet_node.code or slugify_code(sujet_node.titre),
         titre=sujet_node.titre,
         description=sujet_node.description,
@@ -1837,9 +1839,8 @@ def ingest_sujet_tree(
         inserted_by=inserted_by,
     )
 
-    db.add(sujet)
-    db.flush()
-    created_sujet_ids.append(sujet.id)
+    if sujet.id not in created_sujet_ids:
+        created_sujet_ids.append(sujet.id)
 
     for index, action_node in enumerate(sujet_node.actions, start=1):
         action = ingest_action_recursive(

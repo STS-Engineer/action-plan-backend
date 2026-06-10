@@ -24,6 +24,13 @@ from app.services.action_status_logic_service import (
 
 TEAM_ACTIONS_MAX_DEPTH = 2
 SUPPORTED_HOME_SCOPES = {"my", "team", "requested_by_me", "all"}
+SUJET_COUNT_FIELDS = (
+    "total_actions",
+    "completed_actions",
+    "overdue_actions",
+    "in_progress_actions",
+    "blocked_actions",
+)
 
 ZERO_HOME_SUMMARY = {
     "total_sujets": 0,
@@ -34,6 +41,244 @@ ZERO_HOME_SUMMARY = {
     "actions_open": 0,
     "actions_blocked": 0,
 }
+
+
+def normalize_sujet_display_key(titre: str | None) -> str:
+    return " ".join((titre or "").strip().lower().split())
+
+
+def sujet_to_clean_dict(sujet: Sujet) -> dict:
+    return {
+        key: value
+        for key, value in sujet.__dict__.items()
+        if not key.startswith("_")
+    }
+
+
+def get_sujet_logical_group_ids(
+    db: Session,
+    sujet_id: int | None,
+    cache: dict[int, list[int]] | None = None,
+    visiting: set[int] | None = None,
+) -> list[int]:
+    if sujet_id is None:
+        return []
+
+    cache = cache if cache is not None else {}
+    visiting = visiting if visiting is not None else set()
+
+    if sujet_id in cache:
+        return cache[sujet_id]
+
+    if sujet_id in visiting:
+        return [sujet_id]
+
+    sujet = db.query(Sujet).filter(Sujet.id == sujet_id).first()
+
+    if not sujet:
+        return [sujet_id]
+
+    visiting.add(sujet_id)
+    title_key = normalize_sujet_display_key(sujet.titre)
+
+    query = db.query(Sujet)
+
+    if sujet.parent_sujet_id is None:
+        query = query.filter(Sujet.parent_sujet_id.is_(None))
+    else:
+        parent_group_ids = get_sujet_logical_group_ids(
+            db,
+            sujet.parent_sujet_id,
+            cache=cache,
+            visiting=visiting,
+        )
+        query = query.filter(Sujet.parent_sujet_id.in_(parent_group_ids))
+
+    logical_sujets = (
+        query
+        .filter(func.lower(func.trim(Sujet.titre)) == title_key)
+        .order_by(Sujet.created_at.asc(), Sujet.id.asc())
+        .all()
+    )
+
+    group_ids = [logical_sujet.id for logical_sujet in logical_sujets] or [sujet.id]
+
+    for logical_sujet_id in group_ids:
+        cache[logical_sujet_id] = group_ids
+
+    visiting.discard(sujet_id)
+    return group_ids
+
+
+def get_sujet_logical_group_sujets(db: Session, sujet_id: int) -> list[Sujet]:
+    group_ids = get_sujet_logical_group_ids(db, sujet_id)
+
+    if not group_ids:
+        return []
+
+    sujets = (
+        db.query(Sujet)
+        .filter(Sujet.id.in_(group_ids))
+        .order_by(Sujet.created_at.asc(), Sujet.id.asc())
+        .all()
+    )
+    sujets_by_id = {sujet.id: sujet for sujet in sujets}
+
+    return [
+        sujets_by_id[sujet_id]
+        for sujet_id in group_ids
+        if sujet_id in sujets_by_id
+    ]
+
+
+def count_logical_child_sujet_groups(db: Session, parent_sujet_ids: list[int]) -> int:
+    if not parent_sujet_ids:
+        return 0
+
+    children = (
+        db.query(Sujet)
+        .filter(Sujet.parent_sujet_id.in_(parent_sujet_ids))
+        .all()
+    )
+    child_groups = {
+        tuple(get_sujet_logical_group_ids(db, child.id))
+        for child in children
+    }
+
+    return len(child_groups)
+
+
+def merge_serialized_sujets_by_display_key(db: Session, sujets: list[dict]) -> list[dict]:
+    if not sujets:
+        return []
+
+    groups: dict[tuple[int, ...], dict] = {}
+
+    for sujet in sujets:
+        cleaned_sujet = {
+            key: value
+            for key, value in sujet.items()
+            if not str(key).startswith("_")
+        }
+        group_ids = tuple(get_sujet_logical_group_ids(db, cleaned_sujet.get("id")))
+        group_key = group_ids or (cleaned_sujet.get("id"),)
+
+        group = groups.setdefault(
+            group_key,
+            {
+                "items": [],
+                "merged_ids": set(group_key),
+                "latest_created_at": cleaned_sujet.get("created_at"),
+            },
+        )
+        group["items"].append(cleaned_sujet)
+        group["merged_ids"].update(group_key)
+
+        created_at = cleaned_sujet.get("created_at")
+        if created_at and (
+            not group["latest_created_at"]
+            or created_at > group["latest_created_at"]
+        ):
+            group["latest_created_at"] = created_at
+
+    merged_sujets = []
+
+    for group in groups.values():
+        merged_ids = sorted(group["merged_ids"])
+        primary_sujet = (
+            db.query(Sujet)
+            .filter(Sujet.id.in_(merged_ids))
+            .order_by(Sujet.created_at.asc(), Sujet.id.asc())
+            .first()
+        )
+        primary_payload = (
+            sujet_to_clean_dict(primary_sujet)
+            if primary_sujet
+            else dict(group["items"][0])
+        )
+
+        for count_field in SUJET_COUNT_FIELDS:
+            primary_payload[count_field] = sum(
+                int(item.get(count_field) or 0)
+                for item in group["items"]
+            )
+
+        primary_payload["total_sous_sujets"] = count_logical_child_sujet_groups(
+            db,
+            merged_ids,
+        )
+        primary_payload["merged_sujet_ids"] = merged_ids
+        primary_payload["is_merged"] = len(merged_ids) > 1
+        primary_payload["progress"] = (
+            round(
+                (primary_payload["completed_actions"] / primary_payload["total_actions"]) * 100
+            )
+            if primary_payload["total_actions"]
+            else 0
+        )
+        primary_payload["_latest_created_at"] = group["latest_created_at"]
+        merged_sujets.append(primary_payload)
+
+    merged_sujets.sort(
+        key=lambda sujet: sujet.get("_latest_created_at") or sujet.get("created_at"),
+        reverse=True,
+    )
+
+    for sujet in merged_sujets:
+        sujet.pop("_latest_created_at", None)
+
+    return merged_sujets
+
+
+def count_logical_sujet_groups_by_ids(db: Session, sujet_ids) -> int:
+    logical_groups = {
+        tuple(get_sujet_logical_group_ids(db, sujet_id))
+        for sujet_id in sujet_ids
+        if sujet_id is not None
+    }
+
+    return len(logical_groups)
+
+
+def find_or_create_sujet_by_normalized_title(
+    db: Session,
+    *,
+    code: str,
+    titre: str,
+    description: str | None,
+    parent_sujet_id: int | None,
+    inserted_by: str,
+) -> tuple[Sujet, bool]:
+    title_key = normalize_sujet_display_key(titre)
+    query = db.query(Sujet)
+
+    if parent_sujet_id is None:
+        query = query.filter(Sujet.parent_sujet_id.is_(None))
+    else:
+        parent_group_ids = get_sujet_logical_group_ids(db, parent_sujet_id)
+        query = query.filter(Sujet.parent_sujet_id.in_(parent_group_ids))
+
+    existing_sujet = (
+        query
+        .filter(func.lower(func.trim(Sujet.titre)) == title_key)
+        .order_by(Sujet.created_at.asc(), Sujet.id.asc())
+        .first()
+    )
+
+    if existing_sujet:
+        return existing_sujet, False
+
+    sujet = Sujet(
+        code=code,
+        titre=titre,
+        description=description,
+        parent_sujet_id=parent_sujet_id,
+        inserted_by=inserted_by,
+    )
+    db.add(sujet)
+    db.flush()
+
+    return sujet, True
 
 
 def normalize_scope_email(email: str | None) -> str | None:
@@ -73,13 +318,18 @@ def build_sujet_tree_cte():
     )
 
 
-def build_child_sujet_tree_cte(parent_sujet_id: int):
+def build_child_sujet_tree_cte(parent_sujet_id: int | list[int]):
+    parent_sujet_ids = (
+        parent_sujet_id
+        if isinstance(parent_sujet_id, list)
+        else [parent_sujet_id]
+    )
     sujet_tree = (
         select(
             Sujet.id.label("root_id"),
             Sujet.id.label("sujet_id"),
         )
-        .where(Sujet.parent_sujet_id == parent_sujet_id)
+        .where(Sujet.parent_sujet_id.in_(parent_sujet_ids))
         .cte(name="child_sujet_tree", recursive=True)
     )
 
@@ -295,7 +545,7 @@ def serialize_root_sujet_row(
     total_sous_sujets,
 ):
     return {
-        **sujet.__dict__,
+        **sujet_to_clean_dict(sujet),
         "total_actions": total_actions or 0,
         "completed_actions": completed_actions or 0,
         "overdue_actions": overdue_actions or 0,
@@ -474,8 +724,16 @@ async def get_home_summary_service(
         .one()
     )
 
+    visible_root_ids = [
+        row[0]
+        for row in db.query(scoped_actions.c.root_id)
+        .select_from(scoped_actions)
+        .distinct()
+        .all()
+    ]
+
     return {
-        "total_sujets": summary.total_sujets or 0,
+        "total_sujets": count_logical_sujet_groups_by_ids(db, visible_root_ids),
         "total_actions": summary.total_actions or 0,
         "actions_completed": summary.actions_completed or 0,
         "actions_in_progress": summary.actions_in_progress or 0,
@@ -534,7 +792,7 @@ async def getSujetsRacineService(
         .all()
     )
 
-    return [
+    serialized_sujets = [
         serialize_root_sujet_row(
             sujet=sujet,
             total_actions=total_actions,
@@ -555,6 +813,8 @@ async def getSujetsRacineService(
         ) in sujets_racine
     ]
 
+    return merge_serialized_sujets_by_display_key(db, serialized_sujets)
+
 
 async def get_sous_sujets_by_sujet_id_service(
     sujet_id: int,
@@ -566,16 +826,31 @@ async def get_sous_sujets_by_sujet_id_service(
     user_role: str | None = None,
 ):
     include_hidden_closed = normalize_home_scope(scope) == "all" and is_admin_role(user_role)
+    parent_sujet_ids = get_sujet_logical_group_ids(db, sujet_id)
+
     if not email:
         sous_sujets = (
             db.query(Sujet)
-            .filter(Sujet.parent_sujet_id == sujet_id)
+            .filter(Sujet.parent_sujet_id.in_(parent_sujet_ids))
             .order_by(Sujet.created_at.desc())
             .all()
         )
-        return sous_sujets
+        serialized_sujets = [
+            {
+                **sujet_to_clean_dict(sujet),
+                "total_actions": 0,
+                "completed_actions": 0,
+                "overdue_actions": 0,
+                "in_progress_actions": 0,
+                "blocked_actions": 0,
+                "total_sous_sujets": 0,
+            }
+            for sujet in sous_sujets
+        ]
 
-    sujet_tree = build_child_sujet_tree_cte(sujet_id)
+        return merge_serialized_sujets_by_display_key(db, serialized_sujets)
+
+    sujet_tree = build_child_sujet_tree_cte(parent_sujet_ids)
     scoped_actions = build_scoped_actions_for_home_scope(
         email=email,
         scope=scope,
@@ -611,13 +886,13 @@ async def get_sous_sujets_by_sujet_id_service(
         )
         .outerjoin(root_stats, root_stats.c.root_id == Sujet.id)
         .outerjoin(direct_child_counts, direct_child_counts.c.root_id == Sujet.id)
-        .filter(Sujet.parent_sujet_id == sujet_id)
+        .filter(Sujet.parent_sujet_id.in_(parent_sujet_ids))
         .filter(Sujet.id.in_(matching_root_ids_query))
         .order_by(Sujet.created_at.desc())
         .all()
     )
 
-    return [
+    serialized_sujets = [
         serialize_root_sujet_row(
             sujet=sujet,
             total_actions=total_actions,
@@ -637,6 +912,8 @@ async def get_sous_sujets_by_sujet_id_service(
             total_sous_sujets,
         ) in sous_sujets
     ]
+
+    return merge_serialized_sujets_by_display_key(db, serialized_sujets)
 
 
 async def get_team_sujets_racine_service(
@@ -687,7 +964,7 @@ async def get_team_sujets_racine_service(
         .all()
     )
 
-    return [
+    serialized_sujets = [
         serialize_root_sujet_row(
             sujet=sujet,
             total_actions=total_actions,
@@ -707,3 +984,5 @@ async def get_team_sujets_racine_service(
             total_sous_sujets,
         ) in sujets_racine
     ]
+
+    return merge_serialized_sujets_by_display_key(db, serialized_sujets)

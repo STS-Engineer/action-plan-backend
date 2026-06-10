@@ -29,6 +29,7 @@ from app.services.action_status_logic_service import (
     normalize_action_status,
     get_normalized_action_status_expression,
 )
+from app.services.sujet_service import get_sujet_logical_group_ids
 
 
 ACTION_DELETE_FORBIDDEN_MESSAGE = "You can only delete actions you own or manage."
@@ -480,8 +481,10 @@ async def get_actions_by_sujet_id_service(
         if admin_all_scope or not normalized_email
         else get_action_visible_from_home_predicate(Action)
     )
+    sujet_ids = get_sujet_logical_group_ids(db, sujet_id)
+
     filters = [
-        Action.sujet_id == sujet_id,
+        Action.sujet_id.in_(sujet_ids),
         action_visibility_predicate,
     ]
 
@@ -518,23 +521,22 @@ async def get_actions_by_sujet_id_service(
         .all()
     )
 
-    sujet = db.query(Sujet).filter(Sujet.id == sujet_id).first()
-    root_sujet = sujet
-
-    while root_sujet and root_sujet.parent_sujet_id is not None:
-        root_sujet = db.query(Sujet).filter(Sujet.id == root_sujet.parent_sujet_id).first()
-
     result = []
     latest_history_by_action_id = get_latest_action_history_map(
         db,
         [action.id for action in actions],
     )
+    sujet_path_info_by_id = build_sujet_path_info_map(
+        db,
+        [action.sujet_id for action in actions],
+    )
 
     for action in actions:
+        sujet_info = sujet_path_info_by_id.get(action.sujet_id, {})
         result.append(
             action_to_dict(
                 action,
-                root_sujet=root_sujet,
+                root_sujet=sujet_info.get("root_sujet"),
                 latest_history=latest_history_by_action_id.get(action.id),
             )
         )
