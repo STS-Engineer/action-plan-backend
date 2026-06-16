@@ -146,6 +146,10 @@ def _read_enabled_env() -> bool:
     return os.getenv("SCHEDULER_ENABLED", "false").strip().lower() == "true"
 
 
+def _read_daily_reminders_enabled_env() -> bool:
+    return os.getenv("DAILY_REMINDERS_ENABLED", "false").strip().lower() == "true"
+
+
 def _read_timezone_name() -> str:
     return os.getenv("SCHEDULER_TIMEZONE", DEFAULT_SCHEDULER_TIMEZONE).strip() or DEFAULT_SCHEDULER_TIMEZONE
 
@@ -154,6 +158,8 @@ def _read_scheduler_config():
     return {
         "scheduler_enabled_env": os.getenv("SCHEDULER_ENABLED", "false"),
         "scheduler_enabled": _read_enabled_env(),
+        "daily_reminders_enabled_env": os.getenv("DAILY_REMINDERS_ENABLED", "false"),
+        "daily_reminders_enabled": _read_daily_reminders_enabled_env(),
         "timezone": _read_timezone_name(),
         "daily_reminder_hour": _read_int_env("DAILY_REMINDER_HOUR", 8),
         "daily_reminder_minute": _read_int_env("DAILY_REMINDER_MINUTE", 0),
@@ -188,10 +194,13 @@ def _serialize_job(job):
 def get_scheduler_status():
     config = _read_scheduler_config()
     jobs = [_serialize_job(job) for job in scheduler.get_jobs()]
+    registered_job_ids = {job["id"] for job in jobs}
 
     return {
         "scheduler_enabled_env": config["scheduler_enabled_env"],
         "scheduler_enabled": config["scheduler_enabled"],
+        "daily_reminders_enabled_env": config["daily_reminders_enabled_env"],
+        "daily_reminders_enabled": config["daily_reminders_enabled"],
         "scheduler_running": scheduler.running,
         "timezone": config["timezone"],
         "scheduler_timezone": str(getattr(scheduler, "timezone", "")),
@@ -207,6 +216,8 @@ def get_scheduler_status():
         "registered_jobs": jobs,
         "daily_reminder_job_id": DAILY_REMINDER_JOB_ID,
         "weekly_report_job_id": WEEKLY_REPORT_JOB_ID,
+        "daily_job_registered": DAILY_REMINDER_JOB_ID in registered_job_ids,
+        "weekly_job_registered": WEEKLY_REPORT_JOB_ID in registered_job_ids,
         "last_error": _scheduler_last_error,
         "last_started_at": _scheduler_last_started_at,
     }
@@ -216,14 +227,18 @@ def _log_scheduler_status(started: bool):
     status = get_scheduler_status()
     logger.info(
         "[SCHEDULER] Config SCHEDULER_ENABLED=%s timezone=%s "
-        "daily=%02d:%02d weekly=%s %02d:%02d jobs=%s started=%s last_error=%s",
+        "DAILY_REMINDERS_ENABLED=%s daily=%02d:%02d weekly=%s %02d:%02d "
+        "daily_job_registered=%s weekly_job_registered=%s jobs=%s started=%s last_error=%s",
         status["scheduler_enabled_env"],
         status["timezone"],
+        status["daily_reminders_enabled_env"],
         status["daily_reminder_schedule"]["hour"],
         status["daily_reminder_schedule"]["minute"],
         status["weekly_report_schedule"]["day"],
         status["weekly_report_schedule"]["hour"],
         status["weekly_report_schedule"]["minute"],
+        status["daily_job_registered"],
+        status["weekly_job_registered"],
         status["registered_jobs"],
         started,
         status["last_error"],
@@ -245,16 +260,22 @@ def _configure_scheduler(config, timezone):
     global scheduler
 
     scheduler = BackgroundScheduler(timezone=timezone)
-    scheduler.add_job(
-        lambda: run_async_job(daily_reminders_job),
-        CronTrigger(
-            hour=config["daily_reminder_hour"],
-            minute=config["daily_reminder_minute"],
-            timezone=timezone,
-        ),
-        id=DAILY_REMINDER_JOB_ID,
-        replace_existing=True,
-    )
+
+    if config["daily_reminders_enabled"]:
+        scheduler.add_job(
+            lambda: run_async_job(daily_reminders_job),
+            CronTrigger(
+                hour=config["daily_reminder_hour"],
+                minute=config["daily_reminder_minute"],
+                timezone=timezone,
+            ),
+            id=DAILY_REMINDER_JOB_ID,
+            replace_existing=True,
+        )
+        logger.info("[SCHEDULER] Daily reminders enabled.")
+    else:
+        logger.info("[SCHEDULER] Daily reminders disabled by configuration.")
+
     scheduler.add_job(
         lambda: run_async_job(weekly_reports_job),
         CronTrigger(
@@ -266,6 +287,7 @@ def _configure_scheduler(config, timezone):
         id=WEEKLY_REPORT_JOB_ID,
         replace_existing=True,
     )
+    logger.info("[SCHEDULER] Weekly reports enabled.")
 
 
 def start_scheduler():
