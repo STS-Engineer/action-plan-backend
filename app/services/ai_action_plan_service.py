@@ -24,7 +24,7 @@ from app.schemas.ai_action_plan_schema import (
     PlanV1,
     SujetNode,
 )
-from app.services.action_priority_service import calculate_priority_index
+from app.services.action_priority_service import calculate_priority_fields
 from app.services.action_status_logic_service import get_action_active_predicate
 from app.services.directory_service import get_member_by_email, normalize_email
 from app.services.ia_assistant_knowledge_service import (
@@ -53,31 +53,6 @@ PROMPT_POLLUTION_MARKERS = [
 ]
 
 logger = logging.getLogger(__name__)
-
-IMPORTANCE_NORMALIZATION = {
-    "high": "haute",
-    "haute": "haute",
-    "important": "haute",
-    "critique": "haute",
-    "critical": "haute",
-    "medium": "moyenne",
-    "moyenne": "moyenne",
-    "moyen": "moyenne",
-    "average": "moyenne",
-    "low": "faible",
-    "faible": "faible",
-    "basse": "faible",
-}
-
-URGENCY_NORMALIZATION = {
-    "urgent": "Urgent",
-    "urgente": "Urgent",
-    "flexible": "Flexible",
-    "secondary": "Secondaire",
-    "secondaire": "Secondaire",
-    "low": "Secondaire",
-}
-
 
 def slugify_code(value: str, prefix: str = "AI") -> str:
     slug = re.sub(r"[^A-Za-z0-9]+", "-", value.upper()).strip("-")
@@ -120,37 +95,9 @@ def normalize_status(value: str | None) -> str:
     return normalized
 
 
-def normalize_importance_value(value: str | None) -> str:
-    normalized = str(value or "moyenne").strip().lower()
-    return IMPORTANCE_NORMALIZATION.get(normalized, "moyenne")
-
-
-def normalize_urgency_value(value: str | None) -> str:
-    normalized = str(value or "Flexible").strip().lower()
-    return URGENCY_NORMALIZATION.get(normalized, "Flexible")
-
-
 def normalize_optional_email(value: str | None) -> str | None:
     normalized = normalize_email(value)
     return normalized or None
-
-
-def priority_index_to_priorite(priority_index: int | None) -> int:
-    value = priority_index or 0
-
-    if value >= 16:
-        return 1
-
-    if value >= 12:
-        return 2
-
-    if value >= 8:
-        return 3
-
-    if value >= 4:
-        return 4
-
-    return 5
 
 
 def find_member_by_name(directory_db, name: str | None):
@@ -268,9 +215,6 @@ def normalize_action_node(
         raise HTTPException(status_code=400, detail="Maximum action depth is 3.")
 
     action.status = normalize_status(action.status)
-    action.importance = normalize_importance_value(action.importance)
-    action.urgency = normalize_urgency_value(action.urgency)
-    action.escalation_level = max(int(action.escalation_level or 0), 0)
     action.type = ACTION_TYPES[action_depth]
     action.ordre = action.ordre if action.ordre is not None else order
     action.demandeur = get_requester_display_name(inserted_by, directory_db)
@@ -283,18 +227,17 @@ def normalize_action_node(
 
     resolve_responsable(action, inserted_by, directory_db, warnings)
 
-    if action.status == "closed":
-        action.escalation_level = 0
-        action.priority_index = 0
-    else:
-        action.priority_index = calculate_priority_index(
-            action.importance,
-            action.urgency,
-            action.escalation_level,
-        )
-
-    if action.priorite is None:
-        action.priorite = priority_index_to_priorite(action.priority_index)
+    priority_fields = calculate_priority_fields(
+        action.status,
+        action.due_date,
+        action.importance,
+        action.urgency,
+    )
+    action.importance = priority_fields["importance"]
+    action.urgency = priority_fields["urgency"]
+    action.escalation_level = priority_fields["escalation_level"]
+    action.priority_index = priority_fields["priority_index"]
+    action.priorite = priority_fields["priorite"]
 
     count = 1
 

@@ -113,6 +113,10 @@ async def weekly_reports_job():
             return
 
         logger.info("[SCHEDULER] Executing job_id=%s", WEEKLY_REPORT_JOB_ID)
+        logger.info("[SCHEDULER] Recalculating priorities before weekly reports...")
+        priority_result = await recalculate_all_priorities_service(job_db)
+        logger.info("[SCHEDULER] Weekly priority recalculation result=%s", priority_result)
+
         logger.info("[SCHEDULER] Running weekly responsable reports...")
         responsable_result = await send_weekly_responsable_reports_service(job_db)
         logger.info("[SCHEDULER] Weekly responsable reports result=%s", responsable_result)
