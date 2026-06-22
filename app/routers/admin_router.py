@@ -10,6 +10,7 @@ from app.services.action_attachment_service import (
     get_attachment_audit_service,
     get_attachment_health_service,
 )
+from app.services.action_duplicate_service import get_duplicate_action_groups_service
 from app.services.action_reminder_service import (
     debug_daily_reminders_for_user_service,
     run_daily_grouped_reminders_service,
@@ -88,9 +89,14 @@ async def runDailyReminders(
 async def recalculatePriorities(
     payload: PriorityRecalculateRequest,
     db: Session = Depends(get_db),
+    directory_db: Session = Depends(get_directory_db),
     current_user: User = Depends(require_admin_user),
 ):
-    return await recalculate_all_priorities_service(db, dry_run=payload.dry_run)
+    return await recalculate_all_priorities_service(
+        db,
+        dry_run=payload.dry_run,
+        directory_db=directory_db,
+    )
 
 
 @router.get("/reminders/smtp-config")
@@ -142,3 +148,11 @@ async def getAttachmentAudit(
         directory_db=directory_db,
         current_user=current_user,
     )
+
+
+@router.get("/actions/duplicates")
+async def getActionDuplicates(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_user),
+):
+    return get_duplicate_action_groups_service(db)

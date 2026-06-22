@@ -56,6 +56,7 @@ class ActionNode(BaseModel):
     demandeur: str | None = None
     email_demandeur: str | None = None
     due_date: datetime.date | None = None
+    estimated_duration_days: int | None = None
     ordre: int | None = None
     importance: str = "moyenne"
     urgency: str = "Flexible"

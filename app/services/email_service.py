@@ -146,12 +146,18 @@ def _build_message(
     subject: str,
     html_body: str,
     attachments: list[tuple[str, bytes]] | None = None,
+    cc_emails: list[str] | None = None,
 ):
     smtp_user = os.getenv("SMTP_USER")
     message = MIMEMultipart("mixed")
     message["Subject"] = subject
     message["From"] = smtp_user
     message["To"] = to_email
+
+    clean_cc_emails = [email for email in cc_emails or [] if email]
+
+    if clean_cc_emails:
+        message["Cc"] = ", ".join(clean_cc_emails)
 
     body_part = MIMEMultipart("alternative")
     body_part.attach(MIMEText(html_body, "html"))
@@ -209,6 +215,7 @@ def send_email_with_diagnostics(
     subject: str,
     html_body: str,
     attachments: list[tuple[str, bytes]] | None = None,
+    cc_emails: list[str] | None = None,
 ):
     diagnostics = get_smtp_config_diagnostics()
     smtp_host = os.getenv("SMTP_HOST")
@@ -244,13 +251,14 @@ def send_email_with_diagnostics(
             "SMTP_USER is not configured.",
         )
 
-    message = _build_message(to_email, subject, html_body, attachments)
+    clean_cc_emails = [email for email in cc_emails or [] if email]
+    message = _build_message(to_email, subject, html_body, attachments, clean_cc_emails)
     smtp_class = smtplib.SMTP_SSL if smtp_use_ssl else smtplib.SMTP
 
     try:
         logger.info(
             "SMTP send start recipient=%s host=%s port=%s use_tls=%s "
-            "use_ssl=%s auth_enabled=%s sender=%s attachment_count=%s",
+            "use_ssl=%s auth_enabled=%s sender=%s cc_count=%s attachment_count=%s",
             to_email,
             smtp_host,
             smtp_port,
@@ -258,6 +266,7 @@ def send_email_with_diagnostics(
             smtp_use_ssl,
             smtp_auth_enabled,
             smtp_user,
+            len(clean_cc_emails),
             len(attachments or []),
         )
 
@@ -271,7 +280,7 @@ def send_email_with_diagnostics(
             if smtp_auth_enabled and smtp_user and smtp_password:
                 server.login(smtp_user, smtp_password)
 
-            server.sendmail(smtp_user, [to_email], message.as_string())
+            server.sendmail(smtp_user, [to_email, *clean_cc_emails], message.as_string())
 
         logger.info("SMTP send success recipient=%s", to_email)
         return _success_result()
@@ -324,12 +333,14 @@ def send_email(
     subject: str,
     html_body: str,
     attachments: list[tuple[str, bytes]] | None = None,
+    cc_emails: list[str] | None = None,
 ):
     return send_email_with_diagnostics(
         to_email=to_email,
         subject=subject,
         html_body=html_body,
         attachments=attachments,
+        cc_emails=cc_emails,
     )["success"]
 
 

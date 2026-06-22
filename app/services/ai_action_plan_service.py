@@ -34,6 +34,7 @@ from app.services.ia_assistant_knowledge_service import (
 from app.services.ia_responsible_resolver_service import (
     resolve_responsible_query,
 )
+from app.services.action_duplicate_service import find_or_update_duplicate_action
 from app.services.sujet_service import find_or_create_sujet_by_normalized_title
 
 
@@ -232,9 +233,11 @@ def normalize_action_node(
         action.due_date,
         action.importance,
         action.urgency,
+        action.estimated_duration_days,
     )
     action.importance = priority_fields["importance"]
     action.urgency = priority_fields["urgency"]
+    action.estimated_duration_days = priority_fields["estimated_duration_days"]
     action.escalation_level = priority_fields["escalation_level"]
     action.priority_index = priority_fields["priority_index"]
     action.priorite = priority_fields["priorite"]
@@ -1726,30 +1729,47 @@ def ingest_action_recursive(
     order: int,
     created_action_ids: list[int],
 ) -> Action:
-    action = Action(
+    action_values = {
+        "type": ACTION_TYPES[action_depth],
+        "titre": action_node.titre,
+        "description": action_node.description,
+        "status": action_node.status,
+        "priorite": action_node.priorite,
+        "responsable": action_node.responsable,
+        "email_responsable": action_node.email_responsable,
+        "demandeur": action_node.demandeur,
+        "email_demandeur": action_node.email_demandeur,
+        "due_date": action_node.due_date,
+        "estimated_duration_days": action_node.estimated_duration_days,
+        "importance": action_node.importance,
+        "urgency": action_node.urgency,
+        "escalation_level": action_node.escalation_level,
+        "priority_index": action_node.priority_index,
+        "ordre": action_node.ordre if action_node.ordre is not None else order,
+        "closed_date": datetime.date.today() if action_node.status == "closed" else None,
+    }
+    existing_action, _ = find_or_update_duplicate_action(
+        db,
         sujet_id=sujet_id,
         parent_action_id=parent_action_id,
-        type=ACTION_TYPES[action_depth],
         titre=action_node.titre,
-        description=action_node.description,
-        status=action_node.status,
-        priorite=action_node.priorite,
-        responsable=action_node.responsable,
-        email_responsable=action_node.email_responsable,
-        demandeur=action_node.demandeur,
-        email_demandeur=action_node.email_demandeur,
-        due_date=action_node.due_date,
-        importance=action_node.importance,
-        urgency=action_node.urgency,
-        escalation_level=action_node.escalation_level,
-        priority_index=action_node.priority_index,
-        ordre=action_node.ordre if action_node.ordre is not None else order,
-        closed_date=datetime.date.today() if action_node.status == "closed" else None,
+        values=action_values,
     )
 
-    db.add(action)
-    db.flush()
-    created_action_ids.append(action.id)
+    if existing_action:
+        action = existing_action
+        db.flush()
+    else:
+        action = Action(
+            sujet_id=sujet_id,
+            parent_action_id=parent_action_id,
+            **action_values,
+        )
+        db.add(action)
+        db.flush()
+
+    if action.id not in created_action_ids:
+        created_action_ids.append(action.id)
 
     for index, child in enumerate(action_node.sub_actions, start=1):
         ingest_action_recursive(

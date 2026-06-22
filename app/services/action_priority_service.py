@@ -1,6 +1,10 @@
 import datetime
 
+from sqlalchemy import and_, func
+
 from app.models.action import Action
+from app.models.action_event_log import ActionEventLog
+from app.services.action_event_log_service import log_action_event
 from app.services.action_status_logic_service import (
     CLOSED_HOME_BUCKET,
     get_action_active_predicate,
@@ -14,45 +18,47 @@ URGENT_URGENCY = "Urgent"
 FLEXIBLE_URGENCY = "Flexible"
 SECONDARY_URGENCY = "Secondaire"
 CLOSED_PRIORITY_INDEX = 0
-DEFAULT_IMPORTANCE = "moyenne"
-CRITICAL_IMPORTANCE = "critique"
+DEFAULT_IMPORTANCE = "Moyenne"
+HIGH_IMPORTANCE = "Haute"
+MEDIUM_IMPORTANCE = "Moyenne"
+LOW_IMPORTANCE = "Basse"
+CRITICAL_IMPORTANCE = HIGH_IMPORTANCE
+DEFAULT_ESTIMATED_DURATION_DAYS = 2
 
 SKIPPED_STATUSES = {CLOSED_HOME_BUCKET, "archived", "hidden"}
 
 IMPORTANCE_SCORE = {
-    "haute": 10,
-    "critique": 15,
-    "moyenne": 5,
-    "faible": 2,
+    HIGH_IMPORTANCE: 3,
+    MEDIUM_IMPORTANCE: 2,
+    LOW_IMPORTANCE: 1,
 }
 
 URGENCY_SCORE = {
-    URGENT_URGENCY: 8,
-    FLEXIBLE_URGENCY: 3,
+    URGENT_URGENCY: 3,
+    FLEXIBLE_URGENCY: 2,
     SECONDARY_URGENCY: 1,
 }
 
 REACTION_TIME_BY_IMPORTANCE = {
-    "critique": 1,
-    "haute": 2,
-    "moyenne": 5,
-    "faible": 10,
+    HIGH_IMPORTANCE: 2,
+    MEDIUM_IMPORTANCE: 5,
+    LOW_IMPORTANCE: 10,
 }
 
 IMPORTANCE_ALIASES = {
-    "critical": CRITICAL_IMPORTANCE,
-    "critique": CRITICAL_IMPORTANCE,
-    "high": "haute",
-    "haute": "haute",
-    "important": "haute",
-    "medium": "moyenne",
-    "moyenne": "moyenne",
-    "moyen": "moyenne",
-    "average": "moyenne",
-    "normal": "moyenne",
-    "low": "faible",
-    "faible": "faible",
-    "basse": "faible",
+    "critical": HIGH_IMPORTANCE,
+    "critique": HIGH_IMPORTANCE,
+    "high": HIGH_IMPORTANCE,
+    "haute": HIGH_IMPORTANCE,
+    "important": HIGH_IMPORTANCE,
+    "medium": MEDIUM_IMPORTANCE,
+    "moyenne": MEDIUM_IMPORTANCE,
+    "moyen": MEDIUM_IMPORTANCE,
+    "average": MEDIUM_IMPORTANCE,
+    "normal": MEDIUM_IMPORTANCE,
+    "low": LOW_IMPORTANCE,
+    "faible": LOW_IMPORTANCE,
+    "basse": LOW_IMPORTANCE,
 }
 
 URGENCY_ALIASES = {
@@ -77,52 +83,17 @@ def normalize_urgency(value):
     return URGENCY_ALIASES.get(normalized, FLEXIBLE_URGENCY)
 
 
+def normalize_estimated_duration_days(value) -> int:
+    try:
+        duration = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_ESTIMATED_DURATION_DAYS
+
+    return duration if duration > 0 else DEFAULT_ESTIMATED_DURATION_DAYS
+
+
 def get_today():
     return datetime.date.today()
-
-
-def get_days_until_due(action, today=None):
-    due_date = coerce_date(getattr(action, "due_date", None))
-
-    if not due_date:
-        return None
-
-    today = today or get_today()
-
-    return (due_date - today).days
-
-
-def get_overdue_days(action, today=None):
-    days_until_due = get_days_until_due(action, today)
-
-    if days_until_due is None or days_until_due >= 0:
-        return 0
-
-    return abs(days_until_due)
-
-
-def should_skip_priority_recalculation(action, today=None):
-    today = today or get_today()
-    status = normalize_action_status(getattr(action, "status", None))
-    closed_date = getattr(action, "closed_date", None)
-
-    if status in SKIPPED_STATUSES:
-        return True
-
-    if closed_date and closed_date < (today - datetime.timedelta(days=7)):
-        return True
-
-    if is_action_hidden_from_home(action, today):
-        return True
-
-    return False
-
-
-def calculate_action_urgency(action):
-    return derive_urgency_from_due_date(
-        normalize_action_status(getattr(action, "status", None)),
-        getattr(action, "due_date", None),
-    )
 
 
 def coerce_date(value):
@@ -141,53 +112,52 @@ def coerce_date(value):
     return None
 
 
-def derive_due_date_score_and_escalation(status, due_date, today=None):
+def get_days_until_due(action, today=None):
+    due_date = coerce_date(getattr(action, "due_date", None))
+
+    if not due_date:
+        return None
+
+    today = today or get_today()
+    return (due_date - today).days
+
+
+def get_overdue_days(action, today=None):
+    days_until_due = get_days_until_due(action, today)
+
+    if days_until_due is None or days_until_due >= 0:
+        return 0
+
+    return abs(days_until_due)
+
+
+def should_skip_priority_recalculation(action, today=None):
+    today = today or get_today()
+    status = normalize_action_status(getattr(action, "status", None))
+    closed_date = getattr(action, "closed_date", None)
+
+    if status in {"archived", "hidden"}:
+        return True
+
+    if closed_date and closed_date < (today - datetime.timedelta(days=7)):
+        return True
+
+    if is_action_hidden_from_home(action, today):
+        return True
+
+    return False
+
+
+def derive_urgency_from_due_date(
+    status,
+    due_date,
+    estimated_duration_days=None,
+    today=None,
+):
     today = today or get_today()
     due_date = coerce_date(due_date)
     normalized_status = normalize_action_status(status)
-    legacy_overdue_status = normalized_status in {"overdue", "late"}
-
-    if due_date is None:
-        return (18, 1) if legacy_overdue_status else (0, 0)
-
-    days_until_due = (due_date - today).days
-
-    if legacy_overdue_status and days_until_due >= 0:
-        return 18, 1
-
-    if days_until_due > 30:
-        return 1, 0
-
-    if 15 <= days_until_due <= 30:
-        return 3, 0
-
-    if 8 <= days_until_due <= 14:
-        return 5, 0
-
-    if 3 <= days_until_due <= 7:
-        return 8, 0
-
-    if 1 <= days_until_due <= 2:
-        return 12, 0
-
-    if days_until_due == 0:
-        return 15, 0
-
-    overdue_days = abs(days_until_due)
-
-    if overdue_days <= 3:
-        return 18, 1
-
-    if overdue_days <= 7:
-        return 22, 2
-
-    return 28, 3
-
-
-def derive_urgency_from_due_date(status, due_date, today=None):
-    today = today or get_today()
-    due_date = coerce_date(due_date)
-    normalized_status = normalize_action_status(status)
+    duration_days = normalize_estimated_duration_days(estimated_duration_days)
 
     if normalized_status == CLOSED_HOME_BUCKET:
         return SECONDARY_URGENCY
@@ -198,45 +168,75 @@ def derive_urgency_from_due_date(status, due_date, today=None):
     if due_date is None:
         return FLEXIBLE_URGENCY
 
-    days_until_due = (due_date - today).days
+    remaining_days = (due_date - today).days
 
-    if days_until_due <= 2:
+    if remaining_days <= duration_days:
         return URGENT_URGENCY
 
-    if days_until_due <= 14:
-        return FLEXIBLE_URGENCY
+    return FLEXIBLE_URGENCY
 
-    return SECONDARY_URGENCY
+
+def calculate_action_urgency(action):
+    return derive_urgency_from_due_date(
+        normalize_action_status(getattr(action, "status", None)),
+        getattr(action, "due_date", None),
+        getattr(action, "estimated_duration_days", None),
+    )
+
+
+def derive_due_date_score_and_escalation(
+    status,
+    due_date,
+    today=None,
+    importance=None,
+):
+    normalized_status = normalize_action_status(status)
+
+    if normalized_status == CLOSED_HOME_BUCKET:
+        return 0, 0
+
+    due_date = coerce_date(due_date)
+
+    if due_date is None:
+        return 0, 1
+
+    today = today or get_today()
+    overdue_days = (today - due_date).days
+
+    if normalized_status not in {"overdue", "late"} and overdue_days <= 0:
+        return 0, 1
+
+    overdue_days = max(overdue_days, 1)
+    reaction_days = get_reaction_time_days(importance)
+    escalation_level = 1 + max((overdue_days - 1) // reaction_days, 0)
+
+    return 0, escalation_level
 
 
 def calculate_action_escalation_level(action):
     _, escalation_level = derive_due_date_score_and_escalation(
         normalize_action_status(getattr(action, "status", None)),
         getattr(action, "due_date", None),
+        importance=getattr(action, "importance", None),
     )
     return escalation_level
 
 
 def get_importance_score(importance):
-    return IMPORTANCE_SCORE.get(normalize_importance(importance), IMPORTANCE_SCORE[DEFAULT_IMPORTANCE])
+    return IMPORTANCE_SCORE.get(
+        normalize_importance(importance),
+        IMPORTANCE_SCORE[DEFAULT_IMPORTANCE],
+    )
 
 
 def get_urgency_score(urgency):
-    return URGENCY_SCORE.get(normalize_urgency(urgency), URGENCY_SCORE[FLEXIBLE_URGENCY])
+    return URGENCY_SCORE.get(
+        normalize_urgency(urgency),
+        URGENCY_SCORE[FLEXIBLE_URGENCY],
+    )
 
 
 def get_overdue_bonus(action):
-    overdue_days = get_overdue_days(action)
-
-    if overdue_days > 14:
-        return 10
-
-    if overdue_days > 7:
-        return 5
-
-    if overdue_days > 0:
-        return 2
-
     return 0
 
 
@@ -246,6 +246,7 @@ def calculate_action_priority_index(action):
         getattr(action, "due_date", None),
         getattr(action, "importance", None),
         getattr(action, "urgency", None),
+        getattr(action, "estimated_duration_days", None),
     )["priority_index"]
 
 
@@ -253,41 +254,64 @@ def derive_priorite_from_priority_index(priority_index: int | None) -> int:
     return max(int(priority_index or 0), 0)
 
 
-def calculate_priority_fields(status, due_date, importance, urgency, today=None):
+def calculate_priority_fields(
+    status,
+    due_date,
+    importance,
+    urgency,
+    estimated_duration_days=None,
+    today=None,
+):
     today = today or get_today()
     normalized_status = normalize_action_status(status) or "open"
     normalized_importance = normalize_importance(importance)
+    duration_days = normalize_estimated_duration_days(estimated_duration_days)
 
     if normalized_status == CLOSED_HOME_BUCKET:
         return {
             "importance": normalized_importance,
             "urgency": SECONDARY_URGENCY,
+            "estimated_duration_days": duration_days,
             "escalation_level": 0,
             "priority_index": CLOSED_PRIORITY_INDEX,
             "priorite": 0,
         }
 
-    normalized_urgency = (
-        normalize_urgency(urgency)
-        if str(urgency or "").strip()
-        else derive_urgency_from_due_date(normalized_status, due_date, today)
+    due_date_value = coerce_date(due_date)
+    remaining_days = (due_date_value - today).days if due_date_value else None
+    is_overdue = normalized_status in {"overdue", "late"} or (
+        remaining_days is not None and remaining_days < 0
     )
-    due_date_score, escalation_level = derive_due_date_score_and_escalation(
+
+    if is_overdue:
+        normalized_urgency = URGENT_URGENCY
+    elif str(urgency or "").strip():
+        normalized_urgency = normalize_urgency(urgency)
+    else:
+        normalized_urgency = derive_urgency_from_due_date(
+            normalized_status,
+            due_date_value,
+            duration_days,
+            today,
+        )
+
+    _, escalation_level = derive_due_date_score_and_escalation(
         normalized_status,
-        due_date,
+        due_date_value,
         today,
+        normalized_importance,
     )
-    priority_index = max(
-        due_date_score
-        + get_importance_score(normalized_importance)
-        + get_urgency_score(normalized_urgency)
-        + (escalation_level * 3),
-        0,
+    escalation_level = max(int(escalation_level or 1), 1)
+    priority_index = (
+        get_importance_score(normalized_importance)
+        * get_urgency_score(normalized_urgency)
+        * escalation_level
     )
 
     return {
         "importance": normalized_importance,
         "urgency": normalized_urgency,
+        "estimated_duration_days": duration_days,
         "escalation_level": escalation_level,
         "priority_index": priority_index,
         "priorite": derive_priorite_from_priority_index(priority_index),
@@ -298,6 +322,7 @@ def get_priority_field_snapshot(action):
     return {
         "status": getattr(action, "status", None),
         "due_date": str(getattr(action, "due_date", None)) if getattr(action, "due_date", None) else None,
+        "estimated_duration_days": getattr(action, "estimated_duration_days", None),
         "importance": getattr(action, "importance", None),
         "urgency": getattr(action, "urgency", None),
         "escalation_level": getattr(action, "escalation_level", None),
@@ -317,6 +342,7 @@ def calculate_action_priority_after(action, today=None):
         getattr(action, "due_date", None),
         getattr(action, "importance", None),
         getattr(action, "urgency", None),
+        getattr(action, "estimated_duration_days", None),
         today=today,
     )
     return {
@@ -333,7 +359,14 @@ def apply_priority_fields(action, today=None, normalize_status_value: bool = Tru
         action.status = after["status"]
         changed = True
 
-    for field_name in ["importance", "urgency", "escalation_level", "priority_index", "priorite"]:
+    for field_name in [
+        "importance",
+        "urgency",
+        "estimated_duration_days",
+        "escalation_level",
+        "priority_index",
+        "priorite",
+    ]:
         new_value = after[field_name]
 
         if getattr(action, field_name, None) != new_value:
@@ -365,71 +398,161 @@ def enrich_action_priority(action):
     return action
 
 
-async def recalculate_all_priorities_service(db, dry_run: bool = False, sample_limit: int = 10):
-    actions = (
-        db.query(Action)
-        .filter(get_action_active_predicate(Action))
-        .all()
+def _count_null_priority_fields(before: dict) -> int:
+    return sum(
+        1
+        for field_name in [
+            "estimated_duration_days",
+            "importance",
+            "urgency",
+            "escalation_level",
+            "priority_index",
+            "priorite",
+        ]
+        if before.get(field_name) is None
     )
 
-    updated_count = 0
+
+def _has_escalation_notification_today(db, action_id: int, escalation_level: int, today=None) -> bool:
+    today = today or get_today()
+    start_of_day = datetime.datetime.combine(
+        today,
+        datetime.time.min,
+        tzinfo=datetime.timezone.utc,
+    )
+
+    return (
+        db.query(ActionEventLog.id)
+        .filter(ActionEventLog.action_id == action_id)
+        .filter(ActionEventLog.event_type == "action_escalation_email_sent")
+        .filter(ActionEventLog.new_value == str(escalation_level))
+        .filter(ActionEventLog.created_at >= start_of_day)
+        .first()
+        is not None
+    )
+
+
+async def recalculate_all_priorities_service(
+    db,
+    dry_run: bool = False,
+    sample_limit: int = 10,
+    notify_escalations: bool = False,
+    directory_db=None,
+    include_deleted: bool = False,
+):
+    query = db.query(Action)
+
+    if not include_deleted:
+        query = query.filter(get_action_active_predicate(Action))
+
+    actions = query.all()
+
+    total_updates_needed = 0
+    null_fields_fixed = 0
     urgent_count = 0
-    escalated_count = 0
-    processed_count = 0
+    escalation_changes = []
     samples = []
     today = get_today()
 
     for action in actions:
-        processed_count += 1
         before = get_priority_field_snapshot(action)
         after = calculate_action_priority_after(action, today=today)
-        changed = any(
-            before.get(field_name) != after.get(field_name)
-            for field_name in ["status", "importance", "urgency", "escalation_level", "priority_index", "priorite"]
-        )
+        changed_fields = [
+            field_name
+            for field_name in [
+                "status",
+                "estimated_duration_days",
+                "importance",
+                "urgency",
+                "escalation_level",
+                "priority_index",
+                "priorite",
+            ]
+            if before.get(field_name) != after.get(field_name)
+        ]
 
-        if changed:
-            updated_count += 1
+        if after["urgency"] == URGENT_URGENCY:
+            urgent_count += 1
+
+        if changed_fields:
+            total_updates_needed += 1
+            null_fields_fixed += _count_null_priority_fields(before)
 
             if len(samples) < sample_limit:
                 samples.append({
                     "id": action.id,
                     "titre": action.titre,
+                    "changed_fields": changed_fields,
                     "before": before,
                     "after": after,
                 })
 
+            before_escalation = before.get("escalation_level")
+            after_escalation = after.get("escalation_level")
+
+            if before_escalation != after_escalation:
+                escalation_change = {
+                    "id": action.id,
+                    "titre": action.titre,
+                    "old_level": before_escalation,
+                    "new_level": after_escalation,
+                }
+                escalation_changes.append(escalation_change)
+
             if not dry_run:
                 apply_priority_fields(action, today=today)
 
-        effective_urgency = after["urgency"] if changed or dry_run else action.urgency
-        effective_escalation = after["escalation_level"] if changed or dry_run else action.escalation_level
-
-        if effective_urgency == URGENT_URGENCY:
-            urgent_count += 1
-
-        if (effective_escalation or 0) > 0:
-            escalated_count += 1
+                if before.get("escalation_level") != after.get("escalation_level"):
+                    log_action_event(
+                        db=db,
+                        action_id=action.id,
+                        event_type="action_escalation_level_changed",
+                        old_value=str(before.get("escalation_level")),
+                        new_value=str(after.get("escalation_level")),
+                        details=(
+                            "Escalation level recalculated from "
+                            f"{before.get('escalation_level')} to {after.get('escalation_level')}."
+                        ),
+                        created_by="system",
+                    )
 
     if dry_run:
         db.rollback()
     else:
         db.commit()
 
-    return {
+    response = {
         "message": (
             "Action priority recalculation dry run completed"
             if dry_run
             else "Action priorities recalculated successfully"
         ),
         "dry_run": dry_run,
-        "processed_actions": processed_count,
-        "actions_would_update": updated_count if dry_run else 0,
-        "updated_actions": 0 if dry_run else updated_count,
+        "include_deleted": include_deleted,
+        "total_actions_checked": len(actions),
+        "total_updates_needed": total_updates_needed,
+        "actions_would_update": total_updates_needed if dry_run else 0,
+        "updated_actions": 0 if dry_run else total_updates_needed,
+        "null_fields_fixed": null_fields_fixed,
         "urgent_actions": urgent_count,
-        "escalated_actions": escalated_count,
+        "escalation_changes": {
+            "count": len(escalation_changes),
+            "items": escalation_changes[:sample_limit],
+        },
+        "sample_before_after": samples,
         "sample_changes": samples,
     }
+
+    if notify_escalations:
+        from app.services.action_escalation_service import send_due_escalation_notifications_service
+
+        response["escalation_notifications"] = await send_due_escalation_notifications_service(
+            db,
+            directory_db=directory_db,
+            today=today,
+        )
+
+    return response
 
 
 async def recalculate_all_action_priorities_service(db):
@@ -437,16 +560,19 @@ async def recalculate_all_action_priorities_service(db):
 
 
 def calculate_urgency(due_date, estimated_duration_days=None):
-    action_like = type("ActionLike", (), {"due_date": due_date})()
-    return calculate_action_urgency(action_like)
+    return derive_urgency_from_due_date(
+        "open",
+        due_date,
+        estimated_duration_days,
+    )
 
 
 def calculate_priority_index(importance, urgency, escalation_level):
-    return max(
+    normalized_level = max(int(escalation_level or 1), 1)
+    return (
         get_importance_score(importance)
-        + get_urgency_score(urgency)
-        + ((escalation_level or 0) * 3),
-        0,
+        * get_urgency_score(urgency)
+        * normalized_level
     )
 
 
@@ -456,6 +582,8 @@ def get_reaction_time_days(importance):
 
 
 def calculate_reaction_deadline(due_date, importance):
+    due_date = coerce_date(due_date)
+
     if not due_date:
         return None
 
@@ -467,4 +595,4 @@ def is_escalation_ready(action):
     if should_skip_priority_recalculation(action):
         return False
 
-    return calculate_action_escalation_level(action) > 0
+    return calculate_action_escalation_level(action) > 1

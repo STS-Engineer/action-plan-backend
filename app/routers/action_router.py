@@ -31,11 +31,6 @@ from app.services.action_reminder_service import (
     send_grouped_due_date_reminders_service,
     send_demo_action_link_to_olivier_service
 )
-from app.services.weekly_report_service import (
-    send_test_weekly_responsable_reports_service,
-    send_weekly_responsable_reports_service,
-    send_test_weekly_demandeur_reports_service
-)
 from app.services.action_search_service import (
     search_actions_service,
     
@@ -62,6 +57,13 @@ from app.services.auth_service import (
 router = APIRouter(prefix="/api/action_plan_action", tags=["Action Plan"])
 
 ActionScope = Literal["my", "team", "requested_by_me", "all"]
+
+
+def weekly_reports_disabled_response():
+    return {
+        "enabled": False,
+        "message": "Weekly report emails are disabled.",
+    }
 
 
 def validate_action_scope_request(
@@ -297,7 +299,7 @@ async def sendTestWeeklyReports(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin_user),
 ):
-    return await send_test_weekly_responsable_reports_service(db, test_email)
+    return weekly_reports_disabled_response()
 
 
 @router.post("/send-weekly-reports")
@@ -305,7 +307,7 @@ async def sendWeeklyReports(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin_user),
 ):
-    return await send_weekly_responsable_reports_service(db)
+    return weekly_reports_disabled_response()
 @router.get("/search")
 async def searchActions(
     query: str,
@@ -451,4 +453,4 @@ async def sendTestWeeklyDemandeurReport(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin_user),
 ):
-    return await send_test_weekly_demandeur_reports_service(db, test_email)
+    return weekly_reports_disabled_response()

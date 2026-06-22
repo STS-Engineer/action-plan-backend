@@ -141,6 +141,7 @@ def action_detail_to_dict(action, root_sujet=None, latest_history=None):
         "sujet_id": action.sujet_id,
         "parent_action_id": action.parent_action_id,
         "due_date": action.due_date,
+        "estimated_duration_days": action.estimated_duration_days,
         "closed_date": action.closed_date,
         "priority_index": action.priority_index,
         "priorite": action.priorite,
