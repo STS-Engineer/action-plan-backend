@@ -10,6 +10,7 @@ from sqlalchemy import text
 
 from app.config.directory_database import DirectorySessionLocal
 from app.config.database import SessionLocal
+from app.config.organisation_database import OrganisationSessionLocal
 from app.services.action_overdue_service import update_overdue_actions_service
 from app.services.action_escalation_service import send_due_escalation_notifications_service
 from app.services.action_priority_service import recalculate_all_priorities_service
@@ -133,6 +134,7 @@ async def escalation_check_job():
     lock_db = SessionLocal()
     job_db = SessionLocal()
     directory_db = DirectorySessionLocal()
+    organisation_db = OrganisationSessionLocal() if OrganisationSessionLocal is not None else None
     lock_acquired = False
 
     try:
@@ -148,6 +150,7 @@ async def escalation_check_job():
         result = await send_due_escalation_notifications_service(
             job_db,
             directory_db=directory_db,
+            organisation_db=organisation_db,
         )
         logger.info("[SCHEDULER] Escalation check result=%s", result)
     except Exception:
@@ -155,6 +158,8 @@ async def escalation_check_job():
     finally:
         if lock_acquired:
             _release_job_lock(lock_db, ESCALATION_CHECK_JOB_ID, ESCALATION_CHECK_LOCK_KEY)
+        if organisation_db is not None:
+            organisation_db.close()
         directory_db.close()
         job_db.close()
         lock_db.close()

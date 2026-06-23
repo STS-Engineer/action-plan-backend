@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.config.database import get_db
 from app.config.directory_database import get_directory_db
+from app.config.organisation_database import get_organisation_db
 from app.models.user import User
 from app.schema.authSchema import AdminPromoteUserSchema
 from app.services.action_attachment_service import (
@@ -11,6 +12,10 @@ from app.services.action_attachment_service import (
     get_attachment_health_service,
 )
 from app.services.action_duplicate_service import get_duplicate_action_groups_service
+from app.services.action_escalation_diagnostics_service import (
+    get_escalation_hierarchy_debug_service,
+    get_olivier_escalation_audit_service,
+)
 from app.services.action_reminder_service import (
     debug_daily_reminders_for_user_service,
     run_daily_grouped_reminders_service,
@@ -156,3 +161,29 @@ async def getActionDuplicates(
     current_user: User = Depends(require_admin_user),
 ):
     return get_duplicate_action_groups_service(db)
+
+
+@router.get("/escalations/olivier-audit")
+async def getOlivierEscalationAudit(
+    db: Session = Depends(get_db),
+    directory_db: Session = Depends(get_directory_db),
+    organisation_db: Session | None = Depends(get_organisation_db),
+    current_user: User = Depends(require_admin_user),
+):
+    return get_olivier_escalation_audit_service(db, directory_db, organisation_db)
+
+
+@router.get("/escalations/hierarchy-debug")
+async def getEscalationHierarchyDebug(
+    action_id: int = Query(...),
+    db: Session = Depends(get_db),
+    directory_db: Session = Depends(get_directory_db),
+    organisation_db: Session | None = Depends(get_organisation_db),
+    current_user: User = Depends(require_admin_user),
+):
+    return get_escalation_hierarchy_debug_service(
+        db,
+        directory_db,
+        organisation_db,
+        action_id,
+    )
