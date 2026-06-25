@@ -11,12 +11,17 @@ from app.services.action_attachment_service import (
     get_attachment_audit_service,
     get_attachment_health_service,
 )
-from app.services.action_duplicate_service import get_duplicate_action_groups_service
+from app.services.action_duplicate_service import (
+    get_duplicate_action_groups_service,
+    resolve_duplicate_actions_service,
+)
 from app.services.action_escalation_diagnostics_service import (
+    get_escalation_email_audit_service,
     get_escalation_hierarchy_debug_service,
     get_olivier_escalation_audit_service,
     get_escalation_source_status_service,
 )
+from app.services.action_escalation_service import send_due_escalation_notifications_service
 from app.services.action_reminder_service import (
     debug_daily_reminders_for_user_service,
     run_daily_grouped_reminders_service,
@@ -41,6 +46,17 @@ class SmtpTestRequest(BaseModel):
 
 class PriorityRecalculateRequest(BaseModel):
     dry_run: bool = True
+
+
+class DuplicateResolveRequest(BaseModel):
+    dry_run: bool = True
+    strategy: str = "soft_delete_duplicates_keep_oldest"
+    action_ids: list[int]
+
+
+class EscalationRunRequest(BaseModel):
+    dry_run: bool = True
+    test_email: EmailStr | None = None
 
 
 @router.post("/promote-user")
@@ -158,10 +174,38 @@ async def getAttachmentAudit(
 
 @router.get("/actions/duplicates")
 async def getActionDuplicates(
+    email: str | None = Query(None),
+    scope: str | None = Query("all"),
+    include_deleted: bool = Query(False),
+    db: Session = Depends(get_db),
+    directory_db: Session = Depends(get_directory_db),
+    current_user: User = Depends(require_admin_user),
+):
+    return get_duplicate_action_groups_service(
+        db,
+        email=email,
+        scope=scope,
+        include_deleted=include_deleted,
+        directory_db=directory_db,
+    )
+
+
+@router.post("/actions/duplicates/resolve")
+async def resolveActionDuplicates(
+    payload: DuplicateResolveRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin_user),
 ):
-    return get_duplicate_action_groups_service(db)
+    try:
+        return resolve_duplicate_actions_service(
+            db,
+            action_ids=payload.action_ids,
+            dry_run=payload.dry_run,
+            strategy=payload.strategy,
+            current_user=current_user,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/escalations/olivier-audit")
@@ -193,3 +237,26 @@ async def getEscalationSourceStatus(
     current_user: User = Depends(require_admin_user),
 ):
     return get_escalation_source_status_service(organisation_db)
+
+
+@router.get("/escalations/email-audit")
+async def getEscalationEmailAudit(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_user),
+):
+    return get_escalation_email_audit_service(db)
+
+
+@router.post("/escalations/run")
+async def runEscalations(
+    payload: EscalationRunRequest,
+    db: Session = Depends(get_db),
+    organisation_db: Session | None = Depends(get_organisation_db),
+    current_user: User = Depends(require_admin_user),
+):
+    return await send_due_escalation_notifications_service(
+        db,
+        organisation_db=organisation_db,
+        dry_run=payload.dry_run,
+        test_email=str(payload.test_email) if payload.test_email else None,
+    )

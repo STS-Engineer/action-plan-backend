@@ -240,10 +240,13 @@ async def send_due_escalation_notifications_service(
     db,
     organisation_db=None,
     today=None,
+    dry_run: bool = False,
+    test_email: str | None = None,
     **_ignored,
 ):
     today = today or datetime.date.today()
     emails_enabled = _read_escalation_emails_enabled()
+    normalized_test_email = normalize_email(test_email)
     owned_organisation_db = None
     if organisation_db is None and OrganisationSessionLocal is not None:
         owned_organisation_db = OrganisationSessionLocal()
@@ -258,6 +261,8 @@ async def send_due_escalation_notifications_service(
     )
 
     response = {
+        "dry_run": dry_run,
+        "test_email": normalized_test_email,
         "enabled": emails_enabled,
         "hierarchy_source": ORGANISATION_SOURCE if organisation_db is not None else UNAVAILABLE_SOURCE,
         "fallback_enabled": False,
@@ -272,9 +277,11 @@ async def send_due_escalation_notifications_service(
         "summary_emails_skipped_already_sent_today": 0,
         "summary_emails_failed": 0,
         "skipped_not_overdue": 0,
+        "recipients": [],
         "warnings": [],
         "errors": [],
     }
+    dry_run_notifications = []
 
     try:
         for action in actions:
@@ -290,8 +297,9 @@ async def send_due_escalation_notifications_service(
 
             if resolution.get("hierarchy_source_used") == UNAVAILABLE_SOURCE:
                 response["hierarchy_errors"] += 1
-                _log_hierarchy_error(db, action, resolution)
-                db.commit()
+                if not dry_run:
+                    _log_hierarchy_error(db, action, resolution)
+                    db.commit()
                 continue
 
             for warning in resolution.get("warnings") or []:
@@ -309,8 +317,19 @@ async def send_due_escalation_notifications_service(
 
             if not resolution.get("to_email"):
                 response["missing_recipient"] += 1
-                _log_hierarchy_error(db, action, resolution)
-                db.commit()
+                if not dry_run:
+                    _log_hierarchy_error(db, action, resolution)
+                    db.commit()
+                continue
+
+            if dry_run:
+                dry_run_notifications.append({
+                    "action_id": action.id,
+                    "recipient_email": normalize_email(resolution.get("to_email")),
+                    "cc_emails": resolution.get("cc_emails") or [],
+                    "escalation_level": int(resolution.get("level") or 0),
+                    "hierarchy_source_used": resolution.get("hierarchy_source_used"),
+                })
                 continue
 
             _, created = _upsert_pending_notification(db, action, resolution)
@@ -321,8 +340,53 @@ async def send_due_escalation_notifications_service(
 
             db.commit()
 
+        if dry_run:
+            grouped_dry_run = defaultdict(list)
+            for notification in dry_run_notifications:
+                grouped_dry_run[notification["recipient_email"]].append(notification)
+
+            response["summary_recipients"] = len(grouped_dry_run)
+            response["recipients"] = [
+                {
+                    "recipient_email": recipient_email,
+                    "email_to": normalized_test_email or recipient_email,
+                    "pending_count": len(notifications),
+                    "notification_ids": [],
+                    "action_ids": [
+                        notification["action_id"]
+                        for notification in notifications
+                    ],
+                    "email_subject": (
+                        f"Action Plan - You have {len(notifications)} pending escalations"
+                    ),
+                    "link": _build_summary_frontend_url(),
+                    "detailed_content_in_email": False,
+                    "would_send_email": False,
+                }
+                for recipient_email, notifications in sorted(grouped_dry_run.items())
+                if recipient_email
+            ]
+            return response
+
         grouped = _group_pending_notifications(db)
         response["summary_recipients"] = len(grouped)
+        response["recipients"] = [
+            {
+                "recipient_email": recipient_email,
+                "email_to": recipient_email,
+                "pending_count": len(notifications),
+                "notification_ids": [notification.id for notification in notifications],
+                "action_ids": [notification.action_id for notification in notifications],
+                "email_subject": (
+                    f"Action Plan - You have {len(notifications)} pending escalations"
+                ),
+                "link": _build_summary_frontend_url(),
+                "detailed_content_in_email": False,
+                "would_send_email": emails_enabled,
+            }
+            for recipient_email, notifications in sorted(grouped.items())
+            if recipient_email
+        ]
 
         if not emails_enabled:
             return response

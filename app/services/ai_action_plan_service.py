@@ -1728,6 +1728,7 @@ def ingest_action_recursive(
     action_depth: int,
     order: int,
     created_action_ids: list[int],
+    duplicate_prevented_action_ids: list[int],
 ) -> Action:
     action_values = {
         "type": ACTION_TYPES[action_depth],
@@ -1758,6 +1759,8 @@ def ingest_action_recursive(
 
     if existing_action:
         action = existing_action
+        if action.id not in duplicate_prevented_action_ids:
+            duplicate_prevented_action_ids.append(action.id)
         db.flush()
     else:
         action = Action(
@@ -1780,6 +1783,7 @@ def ingest_action_recursive(
             action_depth=action_depth + 1,
             order=index,
             created_action_ids=created_action_ids,
+            duplicate_prevented_action_ids=duplicate_prevented_action_ids,
         )
 
     return action
@@ -1792,6 +1796,7 @@ def ingest_sujet_tree(
     parent_sujet_id: int | None,
     created_sujet_ids: list[int],
     created_action_ids: list[int],
+    duplicate_prevented_action_ids: list[int],
 ) -> Sujet:
     sujet, _ = find_or_create_sujet_by_normalized_title(
         db,
@@ -1814,6 +1819,7 @@ def ingest_sujet_tree(
             action_depth=0,
             order=index,
             created_action_ids=created_action_ids,
+            duplicate_prevented_action_ids=duplicate_prevented_action_ids,
         )
 
     for child in sujet_node.sujets:
@@ -1824,6 +1830,7 @@ def ingest_sujet_tree(
             parent_sujet_id=sujet.id,
             created_sujet_ids=created_sujet_ids,
             created_action_ids=created_action_ids,
+            duplicate_prevented_action_ids=duplicate_prevented_action_ids,
         )
 
     return sujet
@@ -1838,6 +1845,7 @@ async def create_action_plan_service(
     plan = normalize_and_validate_plan(plan, directory_db)
     created_sujet_ids: list[int] = []
     created_action_ids: list[int] = []
+    duplicate_prevented_action_ids: list[int] = []
     root_sujet_ids: list[int] = []
 
     try:
@@ -1849,6 +1857,7 @@ async def create_action_plan_service(
                 parent_sujet_id=None,
                 created_sujet_ids=created_sujet_ids,
                 created_action_ids=created_action_ids,
+                duplicate_prevented_action_ids=duplicate_prevented_action_ids,
             )
             root_sujet_ids.append(root_sujet.id)
 
@@ -1865,6 +1874,8 @@ async def create_action_plan_service(
         "root_sujet_ids": root_sujet_ids,
         "created_sujet_ids": created_sujet_ids,
         "created_action_ids": created_action_ids,
+        "duplicate_prevented": bool(duplicate_prevented_action_ids),
+        "existing_action_ids": duplicate_prevented_action_ids,
         "total_sujets": len(created_sujet_ids),
         "total_actions": len(created_action_ids),
         "warnings": plan.warnings,
@@ -1885,6 +1896,8 @@ async def assistant_create_service(
         "root_sujet_ids": result.get("root_sujet_ids", []),
         "created_sujet_ids": result.get("created_sujet_ids", []),
         "created_action_ids": result.get("created_action_ids", []),
+        "duplicate_prevented": result.get("duplicate_prevented", False),
+        "existing_action_ids": result.get("existing_action_ids", []),
         "plan_title": result.get("plan_title"),
         "message": "Action plan created successfully.",
         "warnings": result.get("warnings", []),

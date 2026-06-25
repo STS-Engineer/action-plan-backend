@@ -1,11 +1,13 @@
 import datetime
 import json
+import os
 import re
 
 from sqlalchemy import text
 
 from app.config.organisation_database import is_organisation_db_configured
 from app.models.action import Action
+from app.models.action_escalation_notification import ActionEscalationNotification
 from app.models.action_event_log import ActionEventLog
 from app.services.action_escalation_service import ESCALATION_EMAIL_EVENT_TYPE
 from app.services.organisation_hierarchy_service import (
@@ -23,6 +25,7 @@ PRODUCTION_HIERARCHY_SOURCE = {
     "person_lookup": "lower(trim(email))",
     "manager_lookup": "manager_hierarchique name -> personne",
 }
+DETAILED_ESCALATION_EMAIL_EVENT_TYPE = "action_escalation_email_sent"
 
 _SENT_DETAILS_RE = re.compile(
     r"Escalation email sent to\s+(?P<to>[^\s]+)(?:\s+cc\s+(?P<cc>[^\n]+))?",
@@ -101,6 +104,26 @@ def _parse_event_metadata(details: str | None):
         return json.loads(details)
     except json.JSONDecodeError:
         return None
+
+
+def _summary_frontend_link():
+    base_url = (
+        os.getenv("FRONTEND_URL")
+        or os.getenv("FRONTEND_BASE_URL")
+        or "http://localhost:5173"
+    ).rstrip("/")
+
+    return f"{base_url}/home?tab=escalations"
+
+
+def _sent_at_group_key(value):
+    if not value:
+        return None
+
+    if isinstance(value, datetime.datetime):
+        return value.replace(microsecond=0).isoformat()
+
+    return str(value)
 
 
 def _recipient_involvement(details, resolution, target_email=OLIVIER_EMAIL):
@@ -338,4 +361,116 @@ def get_olivier_escalation_audit_service(db, organisation_db):
             "valid_hierarchy_source_values": [ORGANISATION_SOURCE, UNAVAILABLE_SOURCE],
             "fallback_enabled": False,
         },
+    }
+
+
+def get_escalation_email_audit_service(db, limit: int = 100):
+    summary_events = (
+        db.query(ActionEventLog)
+        .filter(ActionEventLog.event_type == ESCALATION_EMAIL_EVENT_TYPE)
+        .order_by(ActionEventLog.created_at.desc(), ActionEventLog.id.desc())
+        .limit(limit)
+        .all()
+    )
+    detailed_events = (
+        db.query(ActionEventLog)
+        .filter(ActionEventLog.event_type == DETAILED_ESCALATION_EMAIL_EVENT_TYPE)
+        .order_by(ActionEventLog.created_at.desc(), ActionEventLog.id.desc())
+        .limit(limit)
+        .all()
+    )
+    sent_notifications = (
+        db.query(ActionEscalationNotification)
+        .filter(ActionEscalationNotification.last_summary_email_sent_at.isnot(None))
+        .order_by(
+            ActionEscalationNotification.last_summary_email_sent_at.desc(),
+            ActionEscalationNotification.id.desc(),
+        )
+        .limit(limit)
+        .all()
+    )
+    link = _summary_frontend_link()
+    email_groups = {}
+
+    for event in summary_events:
+        metadata = _parse_event_metadata(event.details) or {}
+        recipient_email = normalize_email(metadata.get("to"))
+        notification_id = metadata.get("notification_id")
+        pending_count = int(metadata.get("summary_pending_count") or 0)
+        key = (
+            recipient_email,
+            _sent_at_group_key(event.created_at),
+        )
+
+        group = email_groups.setdefault(key, {
+            "recipient_email": recipient_email,
+            "pending_count": pending_count,
+            "email_subject": f"Action Plan - You have {pending_count} pending escalations",
+            "link": link,
+            "sent_at": _json_value(event.created_at),
+            "notification_ids": [],
+            "action_ids": [],
+            "event_ids": [],
+            "event_type": ESCALATION_EMAIL_EVENT_TYPE,
+            "detailed_content_in_email": False,
+        })
+
+        if notification_id and notification_id not in group["notification_ids"]:
+            group["notification_ids"].append(notification_id)
+        if event.action_id and event.action_id not in group["action_ids"]:
+            group["action_ids"].append(event.action_id)
+        group["event_ids"].append(event.id)
+
+    for notification in sent_notifications:
+        recipient_email = normalize_email(notification.recipient_email)
+        key = (
+            recipient_email,
+            _sent_at_group_key(notification.last_summary_email_sent_at),
+        )
+
+        group = email_groups.setdefault(key, {
+            "recipient_email": recipient_email,
+            "pending_count": 0,
+            "email_subject": None,
+            "link": link,
+            "sent_at": _json_value(notification.last_summary_email_sent_at),
+            "notification_ids": [],
+            "action_ids": [],
+            "event_ids": [],
+            "event_type": ESCALATION_EMAIL_EVENT_TYPE,
+            "detailed_content_in_email": False,
+        })
+
+        if notification.id not in group["notification_ids"]:
+            group["notification_ids"].append(notification.id)
+        if notification.action_id not in group["action_ids"]:
+            group["action_ids"].append(notification.action_id)
+
+    emails = []
+    for group in email_groups.values():
+        if not group["pending_count"]:
+            group["pending_count"] = len(group["notification_ids"]) or len(group["action_ids"])
+        if not group["email_subject"]:
+            group["email_subject"] = (
+                f"Action Plan - You have {group['pending_count']} pending escalations"
+            )
+        group["notification_ids"] = sorted(group["notification_ids"])
+        group["action_ids"] = sorted(group["action_ids"])
+        emails.append(group)
+
+    emails.sort(key=lambda item: str(item.get("sent_at") or ""), reverse=True)
+
+    return {
+        "summary_event_type": ESCALATION_EMAIL_EVENT_TYPE,
+        "detailed_action_email_event_type": DETAILED_ESCALATION_EMAIL_EVENT_TYPE,
+        "detailed_action_email_events_count": len(detailed_events),
+        "latest_detailed_action_email_events": [
+            _event_to_dict(event)
+            for event in detailed_events[:10]
+        ],
+        "summary_email_events_count": len(summary_events),
+        "notification_rows_with_summary_sent_count": len(sent_notifications),
+        "detailed_content_in_email": False,
+        "emails_count": len(emails),
+        "emails": emails,
     }
