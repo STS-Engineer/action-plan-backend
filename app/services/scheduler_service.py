@@ -8,7 +8,6 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy import text
 
-from app.config.directory_database import DirectorySessionLocal
 from app.config.database import SessionLocal
 from app.config.organisation_database import OrganisationSessionLocal
 from app.services.action_overdue_service import update_overdue_actions_service
@@ -133,7 +132,6 @@ async def daily_priority_recalculation_job():
 async def escalation_check_job():
     lock_db = SessionLocal()
     job_db = SessionLocal()
-    directory_db = DirectorySessionLocal()
     organisation_db = OrganisationSessionLocal() if OrganisationSessionLocal is not None else None
     lock_acquired = False
 
@@ -147,9 +145,16 @@ async def escalation_check_job():
             return
 
         logger.info("[SCHEDULER] Executing job_id=%s", ESCALATION_CHECK_JOB_ID)
+        logger.info("[SCHEDULER] Updating overdue actions before escalation generation...")
+        overdue_result = await update_overdue_actions_service(job_db)
+        logger.info("[SCHEDULER] Escalation overdue update result=%s", overdue_result)
+
+        logger.info("[SCHEDULER] Recalculating priorities before escalation generation...")
+        priority_result = await recalculate_all_priorities_service(job_db)
+        logger.info("[SCHEDULER] Escalation priority recalculation result=%s", priority_result)
+
         result = await send_due_escalation_notifications_service(
             job_db,
-            directory_db=directory_db,
             organisation_db=organisation_db,
         )
         logger.info("[SCHEDULER] Escalation check result=%s", result)
@@ -160,7 +165,6 @@ async def escalation_check_job():
             _release_job_lock(lock_db, ESCALATION_CHECK_JOB_ID, ESCALATION_CHECK_LOCK_KEY)
         if organisation_db is not None:
             organisation_db.close()
-        directory_db.close()
         job_db.close()
         lock_db.close()
 

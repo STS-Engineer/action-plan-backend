@@ -2,17 +2,18 @@ import datetime
 import json
 import re
 
+from sqlalchemy import text
+
+from app.config.organisation_database import is_organisation_db_configured
 from app.models.action import Action
 from app.models.action_event_log import ActionEventLog
 from app.services.action_escalation_service import ESCALATION_EMAIL_EVENT_TYPE
 from app.services.organisation_hierarchy_service import (
-    COMPANY_MEMBERS_SOURCE,
     OLIVIER_EMAIL,
     ORGANISATION_SOURCE,
+    UNAVAILABLE_SOURCE,
     normalize_email,
     resolve_escalation_recipients,
-    resolve_with_company_members,
-    resolve_with_organisation,
 )
 
 
@@ -21,12 +22,6 @@ PRODUCTION_HIERARCHY_SOURCE = {
     "view": "public.v_personne_complete",
     "person_lookup": "lower(trim(email))",
     "manager_lookup": "manager_hierarchique name -> personne",
-}
-FALLBACK_HIERARCHY_SOURCE = {
-    "database_env": "DIRECTORY_DB_NAME",
-    "table": "company_members",
-    "person_lookup": "company_members.email",
-    "manager_lookup": "company_members.manager_email -> company_members.email",
 }
 
 _SENT_DETAILS_RE = re.compile(
@@ -118,12 +113,10 @@ def _recipient_involvement(details, resolution, target_email=OLIVIER_EMAIL):
         reasons.append("event_log_sent_to")
     if target_email and target_email in recipients["cc"]:
         reasons.append("event_log_cc")
-
     if target_email and normalize_email(metadata.get("to")) == target_email:
         reasons.append("event_metadata_to")
     if target_email and target_email in [normalize_email(item) for item in metadata.get("cc") or []]:
         reasons.append("event_metadata_cc")
-
     if target_email and normalize_email(resolution.get("to_email")) == target_email:
         reasons.append("current_resolution_to")
     if target_email and target_email in [normalize_email(item) for item in resolution.get("cc_emails") or []]:
@@ -177,103 +170,106 @@ def _combined_chain_values(resolution, field_name):
     return [
         *[
             {"side": "responsible", **item}
-            for item in _chain_values(
-                resolution.get("organisation", {}).get("responsible_chain"),
-                field_name,
-            )
+            for item in _chain_values(resolution.get("responsible_chain"), field_name)
         ],
         *[
             {"side": "requester", **item}
-            for item in _chain_values(
-                resolution.get("organisation", {}).get("requester_chain"),
-                field_name,
-            )
+            for item in _chain_values(resolution.get("requester_chain"), field_name)
         ],
     ]
 
 
-def _debug_response_for_action(action, organisation_db, directory_db):
-    organisation_resolution = resolve_with_organisation(action, organisation_db)
-    old_company_members_resolution = resolve_with_company_members(action, directory_db)
-    final_resolution = resolve_escalation_recipients(
-        action,
-        organisation_db=organisation_db,
-        directory_db=directory_db,
-    )
+def get_escalation_source_status_service(organisation_db):
+    last_error = None
+    connection_ok = False
+    view_accessible = False
+
+    if not is_organisation_db_configured() or organisation_db is None:
+        last_error = "organisation_db_unavailable"
+    else:
+        try:
+            organisation_db.execute(text("SELECT 1")).scalar()
+            connection_ok = True
+            organisation_db.execute(
+                text("SELECT 1 FROM public.v_personne_complete LIMIT 1")
+            ).first()
+            view_accessible = True
+        except Exception as exc:
+            last_error = {
+                "error_type": type(exc).__name__,
+                "error_detail": str(exc),
+            }
 
     return {
-        "action": _action_to_dict(action),
-        "source_table_view_used_by_production": PRODUCTION_HIERARCHY_SOURCE,
-        "fallback_source": FALLBACK_HIERARCHY_SOURCE,
-        "responsible_lookup": organisation_resolution.get("responsible_lookup"),
-        "requester_lookup": organisation_resolution.get("requester_lookup"),
-        "responsible_chain": organisation_resolution.get("responsible_chain"),
-        "requester_chain": organisation_resolution.get("requester_chain"),
-        "selected_recipients": {
-            "to": final_resolution.get("to_email"),
-            "cc": final_resolution.get("cc_emails") or [],
-            "escalation_level": final_resolution.get("level"),
-            "hierarchy_source_used": final_resolution.get("hierarchy_source_used"),
-            "fallback_used": final_resolution.get("fallback_used"),
-            "missing_reason": final_resolution.get("missing_reason"),
-        },
-        "fallback_used": final_resolution.get("fallback_used"),
-        "old_company_members_chain_for_comparison": {
-            "responsible_chain": old_company_members_resolution.get("responsible_chain"),
-            "requester_chain": old_company_members_resolution.get("requester_chain"),
-            "selected_to": old_company_members_resolution.get("to_email"),
-            "selected_cc": old_company_members_resolution.get("cc_emails") or [],
-            "missing_reason": old_company_members_resolution.get("missing_reason"),
-        },
-        "warnings": final_resolution.get("warnings") or [],
-        "warning_types": _warning_types(final_resolution.get("warnings")),
-        "manager_hierarchique_values": _combined_chain_values(
-            final_resolution,
-            "manager_hierarchique",
-        ),
-        "manager_fonctionnel_values": _combined_chain_values(
-            final_resolution,
-            "manager_fonctionnel",
-        ),
-        "role_parent_values": _combined_chain_values(final_resolution, "role_parent"),
-        "olivier_reached": {
-            "production_resolution": bool(
-                normalize_email(final_resolution.get("to_email")) == OLIVIER_EMAIL
-                or OLIVIER_EMAIL in [
-                    normalize_email(item)
-                    for item in final_resolution.get("cc_emails") or []
-                ]
-            ),
-            "organisation_chain": bool(organisation_resolution.get("target_reached")),
-            "old_company_members_chain": bool(old_company_members_resolution.get("target_reached")),
-        },
-        "raw_resolution": final_resolution,
+        "organisation_db_configured": is_organisation_db_configured(),
+        "organisation_db_connection_ok": connection_ok,
+        "view": "public.v_personne_complete",
+        "view_accessible": view_accessible,
+        "fallback_enabled": False,
+        "last_error": last_error,
     }
 
 
-def get_escalation_hierarchy_debug_service(
-    db,
-    directory_db,
-    organisation_db,
-    action_id: int,
-):
+def get_escalation_hierarchy_debug_service(db, organisation_db, action_id: int):
     action = db.query(Action).filter(Action.id == action_id).first()
 
     if not action:
         return {
             "found": False,
             "action_id": action_id,
+            "hierarchy_source_used": UNAVAILABLE_SOURCE,
+            "fallback_used": False,
+            "fallback_source_removed": True,
             "source_table_view_used_by_production": PRODUCTION_HIERARCHY_SOURCE,
-            "fallback_source": FALLBACK_HIERARCHY_SOURCE,
         }
+
+    resolution = resolve_escalation_recipients(action, organisation_db=organisation_db)
 
     return {
         "found": True,
-        **_debug_response_for_action(action, organisation_db, directory_db),
+        "action": _action_to_dict(action),
+        "source_table_view_used_by_production": PRODUCTION_HIERARCHY_SOURCE,
+        "hierarchy_source_used": resolution.get("hierarchy_source_used"),
+        "fallback_used": False,
+        "fallback_source_removed": True,
+        "responsible_lookup": resolution.get("responsible_lookup"),
+        "requester_lookup": resolution.get("requester_lookup"),
+        "responsible_chain": resolution.get("responsible_chain"),
+        "requester_chain": resolution.get("requester_chain"),
+        "selected_recipients": {
+            "to": resolution.get("to_email"),
+            "cc": resolution.get("cc_emails") or [],
+            "escalation_level": resolution.get("level"),
+            "hierarchy_source_used": resolution.get("hierarchy_source_used"),
+            "fallback_used": False,
+            "missing_reason": resolution.get("missing_reason"),
+        },
+        "warnings": resolution.get("warnings") or [],
+        "warning_types": _warning_types(resolution.get("warnings")),
+        "manager_hierarchique_values": _combined_chain_values(
+            resolution,
+            "manager_hierarchique",
+        ),
+        "manager_fonctionnel_values": _combined_chain_values(
+            resolution,
+            "manager_fonctionnel",
+        ),
+        "role_parent_values": _combined_chain_values(resolution, "role_parent"),
+        "olivier_reached": {
+            "selected_recipient": bool(
+                normalize_email(resolution.get("to_email")) == OLIVIER_EMAIL
+                or OLIVIER_EMAIL in [
+                    normalize_email(item)
+                    for item in resolution.get("cc_emails") or []
+                ]
+            ),
+            "organisation_chain": bool(resolution.get("target_reached")),
+        },
+        "raw_resolution": resolution,
     }
 
 
-def get_olivier_escalation_audit_service(db, directory_db, organisation_db):
+def get_olivier_escalation_audit_service(db, organisation_db):
     rows = (
         db.query(ActionEventLog, Action)
         .outerjoin(Action, Action.id == ActionEventLog.action_id)
@@ -287,18 +283,14 @@ def get_olivier_escalation_audit_service(db, directory_db, organisation_db):
         if not action:
             continue
 
-        final_resolution = resolve_escalation_recipients(
-            action,
-            organisation_db=organisation_db,
-            directory_db=directory_db,
-        )
-        involvement = _recipient_involvement(event.details, final_resolution)
+        resolution = resolve_escalation_recipients(action, organisation_db=organisation_db)
+        involvement = _recipient_involvement(event.details, resolution)
         if not involvement["involved"]:
             continue
 
         level = event.new_value or getattr(action, "escalation_level", None)
         subject = (
-            f"[Action Plan] Escalation level {level} - {action.titre}"
+            f"Action Plan - You have pending escalations"
             if event.event_type == ESCALATION_EMAIL_EVENT_TYPE
             else None
         )
@@ -320,20 +312,22 @@ def get_olivier_escalation_audit_service(db, directory_db, organisation_db):
             "event_metadata": involvement["metadata"],
             "reason_olivier_was_included": involvement["reasons"],
             "resolved_hierarchy_chain": {
-                "responsible": final_resolution.get("responsible_chain"),
-                "requester": final_resolution.get("requester_chain"),
+                "responsible": resolution.get("responsible_chain"),
+                "requester": resolution.get("requester_chain"),
             },
-            "hierarchy_source_used": final_resolution.get("hierarchy_source_used"),
-            "fallback_used": final_resolution.get("fallback_used"),
+            "hierarchy_source_used": resolution.get("hierarchy_source_used"),
+            "fallback_used": False,
+            "fallback_source_removed": True,
         })
 
     return {
         "target_email": OLIVIER_EMAIL,
         "production_hierarchy_source": PRODUCTION_HIERARCHY_SOURCE,
-        "fallback_hierarchy_source": FALLBACK_HIERARCHY_SOURCE,
+        "fallback_enabled": False,
+        "fallback_source_removed": True,
         "audit_basis": (
-            "Escalation emails are read from action_event_log. New events include "
-            "structured metadata; older events are parsed from the legacy details text."
+            "Escalation events are read from action_event_log. New production "
+            "escalations use in-app notification rows and summary emails."
         ),
         "total_escalation_events_scanned": len(rows),
         "events_count": len(events),
@@ -341,11 +335,7 @@ def get_olivier_escalation_audit_service(db, directory_db, organisation_db):
         "events": events,
         "diagnosis": {
             "production_source": ORGANISATION_SOURCE,
-            "fallback_source": COMPANY_MEMBERS_SOURCE,
-            "note": (
-                "Production now resolves escalation chains through public.v_personne_complete "
-                "and uses company_members only when the Organisation source cannot resolve "
-                "the required recipient."
-            ),
+            "valid_hierarchy_source_values": [ORGANISATION_SOURCE, UNAVAILABLE_SOURCE],
+            "fallback_enabled": False,
         },
     }

@@ -15,6 +15,7 @@ from app.services.action_duplicate_service import get_duplicate_action_groups_se
 from app.services.action_escalation_diagnostics_service import (
     get_escalation_hierarchy_debug_service,
     get_olivier_escalation_audit_service,
+    get_escalation_source_status_service,
 )
 from app.services.action_reminder_service import (
     debug_daily_reminders_for_user_service,
@@ -166,24 +167,29 @@ async def getActionDuplicates(
 @router.get("/escalations/olivier-audit")
 async def getOlivierEscalationAudit(
     db: Session = Depends(get_db),
-    directory_db: Session = Depends(get_directory_db),
     organisation_db: Session | None = Depends(get_organisation_db),
     current_user: User = Depends(require_admin_user),
 ):
-    return get_olivier_escalation_audit_service(db, directory_db, organisation_db)
+    return get_olivier_escalation_audit_service(db, organisation_db)
 
 
 @router.get("/escalations/hierarchy-debug")
 async def getEscalationHierarchyDebug(
     action_id: int = Query(...),
     db: Session = Depends(get_db),
-    directory_db: Session = Depends(get_directory_db),
     organisation_db: Session | None = Depends(get_organisation_db),
     current_user: User = Depends(require_admin_user),
 ):
     return get_escalation_hierarchy_debug_service(
         db,
-        directory_db,
         organisation_db,
         action_id,
     )
+
+
+@router.get("/escalations/source-status")
+async def getEscalationSourceStatus(
+    organisation_db: Session | None = Depends(get_organisation_db),
+    current_user: User = Depends(require_admin_user),
+):
+    return get_escalation_source_status_service(organisation_db)

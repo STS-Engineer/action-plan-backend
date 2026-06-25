@@ -6,6 +6,7 @@ from .dashboard_router import router as dashboard_router
 from .auth_router import router as auth_router
 from .ai_assistant_router import router as ai_assistant_router
 from .admin_router import router as admin_router
+from .escalation_router import router as escalation_router
 
 ALL_ROUTERS = [
     sujet_router,
@@ -14,5 +15,6 @@ ALL_ROUTERS = [
     auth_router,
     admin_router,
     ai_assistant_router,
+    escalation_router,
     action_router
 ]

@@ -13,6 +13,7 @@ from app.config.database import Base
 from app.models.sujet import Sujet
 from app.models.action import Action
 from app.models.user import User
+from app.models.action_escalation_notification import ActionEscalationNotification
 ####
 DB_USER = os.getenv("DB_USER")
 DB_PASSWORD_RAW = os.getenv("DB_PASSWORD")
