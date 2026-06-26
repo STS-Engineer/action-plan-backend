@@ -12,7 +12,7 @@ from app.services.action_status_logic_service import (
     IN_PROGRESS_HOME_BUCKET,
     OVERDUE_HOME_BUCKET,
     get_action_active_predicate,
-    get_action_home_bucket,
+    normalize_action_status,
 )
 from app.services.directory_service import get_all_underlings, normalize_email
 from app.services.auth_service import is_admin_role
@@ -31,6 +31,42 @@ SUPPORTED_CHART_KEYS = {
 PRIORITY_HIGH_THRESHOLD = 9
 TOP_LIMIT = 10
 TOP_CRITICAL_LIMIT = 12
+
+
+def is_dashboard_deleted_action(action) -> bool:
+    return bool(getattr(action, "is_deleted", False))
+
+
+def is_dashboard_completed_action(action) -> bool:
+    return (
+        normalize_action_status(getattr(action, "status", None)) == CLOSED_HOME_BUCKET
+        or getattr(action, "closed_date", None) is not None
+    )
+
+
+def is_dashboard_overdue_action(action, today: date | None = None) -> bool:
+    today = today or date.today()
+
+    if is_dashboard_deleted_action(action) or is_dashboard_completed_action(action):
+        return False
+
+    status = normalize_action_status(getattr(action, "status", None))
+    due_date = getattr(action, "due_date", None)
+
+    return status in {"overdue", "late"} or bool(due_date and due_date < today)
+
+
+def get_dashboard_action_bucket(action, today: date | None = None) -> str | None:
+    if is_dashboard_deleted_action(action):
+        return None
+
+    if is_dashboard_completed_action(action):
+        return CLOSED_HOME_BUCKET
+
+    if is_dashboard_overdue_action(action, today):
+        return OVERDUE_HOME_BUCKET
+
+    return IN_PROGRESS_HOME_BUCKET
 
 
 def normalize_dimension(value):
@@ -192,6 +228,14 @@ def get_actions_for_scope(
     )
 
 
+def distinct_actions_by_id(actions):
+    return list({
+        action.id: action
+        for action in actions
+        if getattr(action, "id", None) is not None
+    }.values())
+
+
 def serialize_action(action, member, bucket, escalation_ready):
     return {
         "id": action.id,
@@ -300,8 +344,6 @@ async def get_dashboard_overview_service(
         user_role=user_role,
     )
     members_by_email = get_members_by_email(directory_db)
-    include_all_active_actions = normalized_scope == "all" and is_admin_role(user_role)
-
     visible_actions = []
     top_critical_actions = []
     people_late_counter = Counter()
@@ -319,16 +361,13 @@ async def get_dashboard_overview_service(
     high_priority = 0
     escalation_ready_count = 0
 
-    for action in actions:
+    for action in distinct_actions_by_id(actions):
         enrich_action_priority(action)
 
-        bucket = get_action_home_bucket(action, today)
+        bucket = get_dashboard_action_bucket(action, today)
 
         if bucket is None:
-            if include_all_active_actions and str(action.status or "").strip().lower() == CLOSED_HOME_BUCKET:
-                bucket = CLOSED_HOME_BUCKET
-            else:
-                continue
+            continue
 
         responsible_email = action.email_responsable.lower() if action.email_responsable else None
         member = members_by_email.get(responsible_email) if responsible_email else None
@@ -443,18 +482,14 @@ async def get_dashboard_drilldown_service(
     )
     members_by_email = get_members_by_email(directory_db)
     drilldown_actions = []
-    include_all_active_actions = normalized_scope == "all" and is_admin_role(user_role)
 
-    for action in actions:
+    for action in distinct_actions_by_id(actions):
         enrich_action_priority(action)
 
-        status_bucket = get_action_home_bucket(action, today)
+        status_bucket = get_dashboard_action_bucket(action, today)
 
         if status_bucket is None:
-            if include_all_active_actions and str(action.status or "").strip().lower() == CLOSED_HOME_BUCKET:
-                status_bucket = CLOSED_HOME_BUCKET
-            else:
-                continue
+            continue
 
         responsible_email = action.email_responsable.lower() if action.email_responsable else None
         member = members_by_email.get(responsible_email) if responsible_email else None
@@ -485,4 +520,127 @@ async def get_dashboard_drilldown_service(
         "bucket": bucket,
         "count": len(drilldown_actions),
         "actions": drilldown_actions,
+    }
+
+
+def _dashboard_action_bucket_reason(action, today: date | None = None):
+    today = today or date.today()
+    status = normalize_action_status(getattr(action, "status", None))
+    due_date = getattr(action, "due_date", None)
+
+    if is_dashboard_deleted_action(action):
+        return None, "excluded_deleted_action"
+
+    if is_dashboard_completed_action(action):
+        if getattr(action, "closed_date", None) is not None and status != CLOSED_HOME_BUCKET:
+            return CLOSED_HOME_BUCKET, "completed_because_closed_date_is_set"
+        return CLOSED_HOME_BUCKET, "completed_by_canonical_status"
+
+    if status in {"overdue", "late"}:
+        return OVERDUE_HOME_BUCKET, "overdue_by_canonical_status"
+
+    if due_date and due_date < today:
+        return OVERDUE_HOME_BUCKET, "overdue_because_due_date_is_before_today"
+
+    return IN_PROGRESS_HOME_BUCKET, "active_not_closed_not_overdue"
+
+
+def get_dashboard_diagnostics_service(db: Session):
+    today = date.today()
+    actions = db.query(Action).all()
+    distinct_actions = distinct_actions_by_id(actions)
+    bucket_members = {
+        CLOSED_HOME_BUCKET: set(),
+        OVERDUE_HOME_BUCKET: set(),
+        IN_PROGRESS_HOME_BUCKET: set(),
+    }
+    excluded_deleted_ids = []
+
+    for action in distinct_actions:
+        bucket = get_dashboard_action_bucket(action, today)
+
+        if bucket is None:
+            if is_dashboard_deleted_action(action):
+                excluded_deleted_ids.append(action.id)
+            continue
+
+        bucket_members[bucket].add(action.id)
+
+    completed_ids = bucket_members[CLOSED_HOME_BUCKET]
+    overdue_ids = bucket_members[OVERDUE_HOME_BUCKET]
+    in_progress_ids = bucket_members[IN_PROGRESS_HOME_BUCKET]
+    overlap_ids = sorted(
+        (completed_ids & overdue_ids)
+        | (completed_ids & in_progress_ids)
+        | (overdue_ids & in_progress_ids)
+    )
+    incorrectly_overdue_closed_ids = sorted(
+        action.id
+        for action in distinct_actions
+        if is_dashboard_completed_action(action) and action.id in overdue_ids
+    )
+    deleted_counted_ids = sorted(
+        action.id
+        for action in distinct_actions
+        if is_dashboard_deleted_action(action)
+        and action.id in (completed_ids | overdue_ids | in_progress_ids)
+    )
+
+    return {
+        "generated_at": today.isoformat(),
+        "source_tables_used": ["action"],
+        "counting_method": "distinct action.id from current action rows only",
+        "total_rows_scanned": len(actions),
+        "total_distinct_actions_scanned": len(distinct_actions),
+        "duplicate_count_risk": len(actions) != len(distinct_actions),
+        "total_active_actions": len(completed_ids | overdue_ids | in_progress_ids),
+        "completed_count": len(completed_ids),
+        "in_progress_count": len(in_progress_ids),
+        "overdue_count": len(overdue_ids),
+        "completed_action_ids": sorted(completed_ids),
+        "in_progress_action_ids": sorted(in_progress_ids),
+        "overdue_action_ids": sorted(overdue_ids),
+        "deleted_action_ids_excluded": sorted(excluded_deleted_ids),
+        "actions_counted_in_more_than_one_bucket": overlap_ids,
+        "closed_completed_actions_incorrectly_counted_as_overdue": incorrectly_overdue_closed_ids,
+        "deleted_actions_counted": deleted_counted_ids,
+        "history_tables_used_for_counts": False,
+        "event_tables_used_for_counts": False,
+    }
+
+
+def get_dashboard_action_status_debug_service(db: Session, action_id: int):
+    action = db.query(Action).filter(Action.id == action_id).first()
+
+    if not action:
+        return {
+            "found": False,
+            "action_id": action_id,
+            "computed_bucket": None,
+            "why": "action_not_found",
+            "dashboard_bucket_membership": {
+                CLOSED_HOME_BUCKET: False,
+                OVERDUE_HOME_BUCKET: False,
+                IN_PROGRESS_HOME_BUCKET: False,
+            },
+        }
+
+    today = date.today()
+    bucket, reason = _dashboard_action_bucket_reason(action, today)
+
+    return {
+        "found": True,
+        "action_id": action.id,
+        "raw_status": action.status,
+        "canonical_status": normalize_action_status(action.status),
+        "due_date": action.due_date.isoformat() if action.due_date else None,
+        "closed_date": action.closed_date.isoformat() if action.closed_date else None,
+        "is_deleted": bool(action.is_deleted),
+        "computed_bucket": bucket,
+        "why": reason,
+        "dashboard_bucket_membership": {
+            CLOSED_HOME_BUCKET: bucket == CLOSED_HOME_BUCKET,
+            OVERDUE_HOME_BUCKET: bucket == OVERDUE_HOME_BUCKET,
+            IN_PROGRESS_HOME_BUCKET: bucket == IN_PROGRESS_HOME_BUCKET,
+        },
     }

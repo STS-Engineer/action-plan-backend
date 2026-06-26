@@ -1,4 +1,5 @@
 import datetime
+import unicodedata
 
 from sqlalchemy import and_, case, func, or_, true
 
@@ -21,13 +22,24 @@ STATUS_ALIASES = {
     "completed": "closed",
     "complete": "closed",
     "done": "closed",
+    "termine": "closed",
+    "terminee": "closed",
+    "finished": "closed",
     "overdue": "overdue",
     "late": "overdue",
 }
 
 
+def _remove_accents(value: str) -> str:
+    return "".join(
+        character
+        for character in unicodedata.normalize("NFKD", value)
+        if not unicodedata.combining(character)
+    )
+
+
 def normalize_action_status(status: str | None) -> str:
-    normalized = (status or "").strip().lower()
+    normalized = _remove_accents((status or "").strip().lower())
     return STATUS_ALIASES.get(normalized, normalized)
 
 
@@ -39,7 +51,10 @@ def is_action_hidden_from_home(action, today: datetime.date | None = None) -> bo
     status = normalize_action_status(getattr(action, "status", None))
     closed_date = getattr(action, "closed_date", None)
 
-    if status != CLOSED_HOME_BUCKET or not closed_date:
+    if status != CLOSED_HOME_BUCKET and not closed_date:
+        return False
+
+    if not closed_date:
         return False
 
     return closed_date < (today - datetime.timedelta(days=HIDDEN_CLOSED_DAYS))
@@ -49,11 +64,12 @@ def get_action_home_bucket(action, today: datetime.date | None = None) -> str | 
     today = today or datetime.date.today()
     status = normalize_action_status(getattr(action, "status", None))
     due_date = getattr(action, "due_date", None)
+    closed_date = getattr(action, "closed_date", None)
 
     if is_action_hidden_from_home(action, today):
         return None
 
-    if status == CLOSED_HOME_BUCKET:
+    if status == CLOSED_HOME_BUCKET or closed_date:
         return CLOSED_HOME_BUCKET
 
     if status in OVERDUE_STATUSES:
@@ -90,20 +106,41 @@ def get_normalized_action_status_expression(action_like=Action):
 
     return case(
         (raw_status.in_(["pending", "in progress", "in_progress"]), "open"),
-        (raw_status.in_(["completed", "complete", "done"]), CLOSED_HOME_BUCKET),
+        (
+            raw_status.in_([
+                "completed",
+                "complete",
+                "done",
+                "termine",
+                "terminee",
+                "termin\u00e9",
+                "termin\u00e9e",
+                "finished",
+            ]),
+            CLOSED_HOME_BUCKET,
+        ),
         (raw_status == "late", OVERDUE_HOME_BUCKET),
         else_=raw_status,
     )
 
 
 def get_action_hidden_from_home_predicate(action_like=Action):
-    status_expr = get_normalized_action_status_expression(action_like)
     closed_date_col = _get_action_column(action_like, "closed_date")
 
     return and_(
-        status_expr == CLOSED_HOME_BUCKET,
+        get_action_closed_state_predicate(action_like),
         closed_date_col.isnot(None),
         closed_date_col < (func.current_date() - HIDDEN_CLOSED_DAYS),
+    )
+
+
+def get_action_closed_state_predicate(action_like=Action):
+    status_expr = get_normalized_action_status_expression(action_like)
+    closed_date_col = _get_action_column(action_like, "closed_date")
+
+    return or_(
+        status_expr == CLOSED_HOME_BUCKET,
+        closed_date_col.isnot(None),
     )
 
 
@@ -115,11 +152,9 @@ def get_action_visible_from_home_predicate(action_like=Action):
 
 
 def get_action_closed_visible_predicate(action_like=Action):
-    status_expr = get_normalized_action_status_expression(action_like)
-
     return and_(
         get_action_visible_from_home_predicate(action_like),
-        status_expr == CLOSED_HOME_BUCKET,
+        get_action_closed_state_predicate(action_like),
     )
 
 
@@ -129,12 +164,12 @@ def get_action_overdue_predicate(action_like=Action):
 
     return and_(
         get_action_visible_from_home_predicate(action_like),
+        ~get_action_closed_state_predicate(action_like),
         or_(
             status_expr.in_(OVERDUE_STATUSES),
             and_(
                 due_date_col.isnot(None),
                 due_date_col < func.current_date(),
-                status_expr != CLOSED_HOME_BUCKET,
             ),
         ),
     )
@@ -145,6 +180,7 @@ def get_action_in_progress_predicate(action_like=Action):
 
     return and_(
         get_action_visible_from_home_predicate(action_like),
+        ~get_action_closed_state_predicate(action_like),
         status_expr.in_(["open", BLOCKED_HOME_BUCKET]),
         ~get_action_overdue_predicate(action_like),
     )

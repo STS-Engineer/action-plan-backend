@@ -30,6 +30,10 @@ from app.services.action_priority_service import recalculate_all_priorities_serv
 from app.services.auth_service import normalize_email, require_admin_user
 from app.services.email_service import get_smtp_config_diagnostics, send_smtp_test_email
 from app.services.scheduler_service import get_scheduler_status, reload_scheduler
+from app.services.dashboard_service import (
+    get_dashboard_action_status_debug_service,
+    get_dashboard_diagnostics_service,
+)
 
 
 router = APIRouter(prefix="/api/admin", tags=["Admin"])
@@ -119,6 +123,23 @@ async def recalculatePriorities(
         dry_run=payload.dry_run,
         directory_db=directory_db,
     )
+
+
+@router.get("/dashboard/diagnostics")
+async def getDashboardDiagnostics(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_user),
+):
+    return get_dashboard_diagnostics_service(db)
+
+
+@router.get("/dashboard/action-status-debug")
+async def getDashboardActionStatusDebug(
+    action_id: int = Query(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_user),
+):
+    return get_dashboard_action_status_debug_service(db, action_id)
 
 
 @router.get("/reminders/smtp-config")
