@@ -30,6 +30,7 @@ from app.services.action_status_logic_service import (
     get_normalized_action_status_expression,
 )
 from app.services.sujet_service import get_sujet_logical_group_ids
+from app.services.team_scope_service import get_direct_report_emails_for_team_scope
 
 
 ACTION_DELETE_FORBIDDEN_MESSAGE = "You can only delete actions you own or manage."
@@ -221,28 +222,16 @@ def build_sujet_path_info_map(db: Session, sujet_ids):
     return path_info_by_sujet_id
 
 
-def get_team_scope_action_emails(email: str | None, directory_db) -> list[str]:
-    from app.services.directory_service import get_underlings_until_depth
-
+def get_team_scope_action_emails(email: str | None, organisation_db) -> list[str]:
     normalized_email = normalize_access_email(email)
 
-    if not normalized_email:
+    if not normalized_email or organisation_db is None:
         return []
 
-    underlings = get_underlings_until_depth(
-        directory_db,
+    return get_direct_report_emails_for_team_scope(
+        organisation_db,
         normalized_email,
-        max_depth=TEAM_ACTIONS_MAX_DEPTH,
     )
-
-    return list(dict.fromkeys([
-        normalized_underling_email
-        for normalized_underling_email in (
-            normalize_access_email(member.email)
-            for member in underlings
-        )
-        if normalized_underling_email
-    ]))
 
 
 def normalize_action_scope(scope: str | None) -> str:
@@ -282,6 +271,7 @@ def build_action_scope_filter(
     directory_db,
     requester_values: list[str] | None = None,
     user_role: str | None = None,
+    organisation_db=None,
 ):
     email_responsable = func.lower(func.coalesce(action_like.email_responsable, ""))
     normalized_scope = normalize_action_scope(scope)
@@ -293,7 +283,7 @@ def build_action_scope_filter(
         return true()
 
     if normalized_scope == "team":
-        underling_emails = get_team_scope_action_emails(normalized_email, directory_db)
+        underling_emails = get_team_scope_action_emails(normalized_email, organisation_db)
 
         if not underling_emails:
             return None
@@ -372,6 +362,7 @@ async def get_filtered_actions_service(
     db: Session,
     directory_db,
     user_role: str | None = None,
+    organisation_db=None,
 ):
     normalized_email = normalize_access_email(email)
     normalized_scope = (scope or "my").strip().lower()
@@ -416,6 +407,7 @@ async def get_filtered_actions_service(
             else None
         ),
         user_role=user_role,
+        organisation_db=organisation_db,
     )
 
     if scope_filter is None:
@@ -474,6 +466,7 @@ async def get_actions_by_sujet_id_service(
     directory_db=None,
     status: str | None = None,
     user_role: str | None = None,
+    organisation_db=None,
 ):
     normalized_email = normalize_access_email(email)
     admin_all_scope = normalize_action_scope(scope) == "all" and is_admin_role(user_role)
@@ -501,6 +494,7 @@ async def get_actions_by_sujet_id_service(
                 else None
             ),
             user_role=user_role,
+            organisation_db=organisation_db,
         )
 
         if scope_filter is None:
@@ -844,7 +838,7 @@ async def get_my_actions_service(email: str, db: Session):
         )
         for action in actions
     ]
-async def get_team_actions_service(email: str, db: Session, directory_db):
+async def get_team_actions_service(email: str, db: Session, organisation_db):
     normalized_email = normalize_access_email(email)
 
     if not normalized_email:
@@ -853,7 +847,7 @@ async def get_team_actions_service(email: str, db: Session, directory_db):
             "actions": [],
         }
 
-    underling_emails = get_team_scope_action_emails(normalized_email, directory_db)
+    underling_emails = get_team_scope_action_emails(normalized_email, organisation_db)
 
     if not underling_emails:
         return {

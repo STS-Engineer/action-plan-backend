@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.config.database import get_db
 from app.config.directory_database import get_directory_db
+from app.config.organisation_database import get_organisation_db
 from app.models.user import User
 from app.services.auth_service import get_current_user
 from app.services.auth_service import is_admin, normalize_user_role
@@ -22,6 +23,7 @@ async def getDashboardOverview(
     scope: str = Query("my"),
     db: Session = Depends(get_db),
     directory_db: Session = Depends(get_directory_db),
+    organisation_db: Session | None = Depends(get_organisation_db),
     current_user: User = Depends(get_current_user),
 ):
     normalized_scope = (scope or "my").strip().lower()
@@ -40,6 +42,7 @@ async def getDashboardOverview(
         email=requested_email or token_email,
         scope=scope,
         user_role=normalize_user_role(current_user.role),
+        organisation_db=organisation_db,
     )
 
 
@@ -51,6 +54,7 @@ async def getDashboardDrilldown(
     bucket: str = Query(...),
     db: Session = Depends(get_db),
     directory_db: Session = Depends(get_directory_db),
+    organisation_db: Session | None = Depends(get_organisation_db),
     current_user: User = Depends(get_current_user),
 ):
     requested_email = normalize_email(email)
@@ -72,4 +76,5 @@ async def getDashboardDrilldown(
         chart=chart,
         bucket=bucket,
         user_role=normalize_user_role(current_user.role),
+        organisation_db=organisation_db,
     )

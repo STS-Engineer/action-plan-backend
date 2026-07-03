@@ -14,8 +14,9 @@ from app.services.action_status_logic_service import (
     get_action_active_predicate,
     normalize_action_status,
 )
-from app.services.directory_service import get_all_underlings, normalize_email
+from app.services.directory_service import normalize_email
 from app.services.auth_service import is_admin_role
+from app.services.team_scope_service import get_direct_report_emails_for_team_scope
 
 
 SUPPORTED_SCOPES = {"my", "team", "global", "all"}
@@ -191,6 +192,7 @@ def get_actions_for_scope(
     email: str | None,
     scope: str,
     user_role: str | None = None,
+    organisation_db=None,
 ):
     normalized_email = normalize_email(email)
     active_query = db.query(Action).filter(get_action_active_predicate(Action))
@@ -205,12 +207,10 @@ def get_actions_for_scope(
         return []
 
     if scope == "team":
-        underlings = get_all_underlings(directory_db, normalized_email)
-        underling_emails = [
-            member.email.lower()
-            for member in underlings
-            if member.email
-        ]
+        underling_emails = get_direct_report_emails_for_team_scope(
+            organisation_db,
+            normalized_email,
+        )
 
         if not underling_emails:
             return []
@@ -332,6 +332,7 @@ async def get_dashboard_overview_service(
     email: str | None = None,
     scope: str = "my",
     user_role: str | None = None,
+    organisation_db=None,
 ):
     normalized_scope = normalize_dashboard_scope(scope)
 
@@ -342,6 +343,7 @@ async def get_dashboard_overview_service(
         email,
         normalized_scope,
         user_role=user_role,
+        organisation_db=organisation_db,
     )
     members_by_email = get_members_by_email(directory_db)
     visible_actions = []
@@ -460,6 +462,7 @@ async def get_dashboard_drilldown_service(
     chart: str,
     bucket: str,
     user_role: str | None = None,
+    organisation_db=None,
 ):
     normalized_scope = normalize_dashboard_scope(scope)
     normalized_chart = (chart or "").strip().lower()
@@ -479,6 +482,7 @@ async def get_dashboard_drilldown_service(
         email,
         normalized_scope,
         user_role=user_role,
+        organisation_db=organisation_db,
     )
     members_by_email = get_members_by_email(directory_db)
     drilldown_actions = []

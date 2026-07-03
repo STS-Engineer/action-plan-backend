@@ -47,6 +47,7 @@ from app.services.action_attachment_service import (
     download_action_attachment_service,
 )
 from app.config.directory_database import get_directory_db
+from app.config.organisation_database import get_organisation_db
 from app.services.action_overdue_service import update_overdue_actions_service
 from app.services.auth_service import (
     get_current_user,
@@ -93,6 +94,7 @@ async def getActionsBySujetId(
     scope: ActionScope | None = None,
     db: Session = Depends(get_db),
     directory_db: Session = Depends(get_directory_db),
+    organisation_db: Session | None = Depends(get_organisation_db),
     current_user: User = Depends(get_current_user),
 ):
     requested_email = validate_action_scope_request(email, scope, current_user)
@@ -105,6 +107,7 @@ async def getActionsBySujetId(
         directory_db=directory_db,
         status=status,
         user_role=normalize_user_role(current_user.role),
+        organisation_db=organisation_db,
     )
 
 @router.get("/actions/{action_id}")
@@ -315,6 +318,7 @@ async def searchActions(
     scope: str | None = Query(None),
     db: Session = Depends(get_db),
     directory_db: Session = Depends(get_directory_db),
+    organisation_db: Session | None = Depends(get_organisation_db),
     current_user: User = Depends(get_current_user),
 ):
     requested_email = validate_action_scope_request(email, scope, current_user)
@@ -325,6 +329,7 @@ async def searchActions(
         email=requested_email,
         scope=scope or "my",
         directory_db=directory_db,
+        organisation_db=organisation_db,
         user_role=normalize_user_role(current_user.role),
     )
 
@@ -336,6 +341,7 @@ async def getFilteredActions(
     status: Literal["overdue", "closed", "in_progress", "blocked", "all"] = Query("all"),
     db: Session = Depends(get_db),
     directory_db: Session = Depends(get_directory_db),
+    organisation_db: Session | None = Depends(get_organisation_db),
     current_user: User = Depends(get_current_user),
 ):
     requested_email = normalize_access_email(email)
@@ -353,6 +359,7 @@ async def getFilteredActions(
         status=status,
         db=db,
         directory_db=directory_db,
+        organisation_db=organisation_db,
         user_role=normalize_user_role(current_user.role),
     )
 
@@ -371,11 +378,11 @@ async def getMyActions(
 async def getTeamActions(
     email: str,
     db: Session = Depends(get_db),
-    directory_db: Session = Depends(get_directory_db),
+    organisation_db: Session | None = Depends(get_organisation_db),
     current_user: User = Depends(get_current_user),
 ):
     requested_email = validate_action_scope_request(email, "team", current_user)
-    return await get_team_actions_service(requested_email, db, directory_db)
+    return await get_team_actions_service(requested_email, db, organisation_db)
 @router.post("/actions/{action_id}/attachments")
 async def uploadActionAttachment(
     action_id: int,

@@ -12,6 +12,7 @@ from app.services.sujet_service import (
     get_team_sujets_racine_service,
 )
 from app.config.directory_database import get_directory_db
+from app.config.organisation_database import get_organisation_db
 from app.services.action_access_service import normalize_access_email
 from app.services.auth_service import (
     get_current_user,
@@ -55,6 +56,7 @@ async def getHomeSummary(
     scope: HomeScope = "my",
     db: Session = Depends(get_db),
     directory_db: Session = Depends(get_directory_db),
+    organisation_db: Session | None = Depends(get_organisation_db),
     current_user: User = Depends(get_current_user),
 ):
     requested_email = validate_home_scope_request(email, scope, current_user)
@@ -65,6 +67,7 @@ async def getHomeSummary(
         db,
         directory_db,
         user_role=normalize_user_role(current_user.role),
+        organisation_db=organisation_db,
     )
 
 @router.get("/sujets")
@@ -94,6 +97,7 @@ async def getSujetsRacine(
     status: str | None = None,
     scope: HomeScope = "my",
     directory_db: Session = Depends(get_directory_db),
+    organisation_db: Session | None = Depends(get_organisation_db),
     current_user: User = Depends(get_current_user),
 ):
     requested_email = validate_home_scope_request(email, scope, current_user)
@@ -105,6 +109,7 @@ async def getSujetsRacine(
         scope,
         directory_db,
         user_role=normalize_user_role(current_user.role),
+        organisation_db=organisation_db,
     )
 
 @router.get("/sujets/{sujet_id}/sous-sujets")
@@ -115,6 +120,7 @@ async def getSousSujetsBySujetId(
     scope: HomeScope | None = None,
     db: Session = Depends(get_db),
     directory_db: Session = Depends(get_directory_db),
+    organisation_db: Session | None = Depends(get_organisation_db),
     current_user: User = Depends(get_current_user),
 ):
     requested_email = validate_home_scope_request(email, scope, current_user)
@@ -127,13 +133,14 @@ async def getSousSujetsBySujetId(
         directory_db=directory_db,
         status=status,
         user_role=normalize_user_role(current_user.role),
+        organisation_db=organisation_db,
     )
 @router.get("/team-sujets-racine")
 async def getTeamSujetsRacine(
     email: str,
     status: str | None = None,
     db: Session = Depends(get_db),
-    directory_db: Session = Depends(get_directory_db),
+    organisation_db: Session | None = Depends(get_organisation_db),
     current_user: User = Depends(get_current_user),
 ):
     requested_email = validate_home_scope_request(email, "team", current_user)
@@ -141,7 +148,7 @@ async def getTeamSujetsRacine(
     return await get_team_sujets_racine_service(
         requested_email,
         db,
-        directory_db,
+        organisation_db,
         status,
         user_role=normalize_user_role(current_user.role),
     )

@@ -9,31 +9,20 @@ from app.services.action_requester_scope_service import (
 )
 from app.services.action_status_logic_service import get_action_active_predicate
 from app.services.auth_service import is_admin_role
-from app.services.directory_service import get_underlings_until_depth
+from app.services.team_scope_service import get_direct_report_emails_for_team_scope
 
 
 TEAM_ACTIONS_MAX_DEPTH = 2
 SUPPORTED_SEARCH_SCOPES = {"my", "team", "requested_by_me", "all"}
 
 
-def get_team_scope_emails(directory_db, email: str | None) -> list[str]:
+def get_team_scope_emails(organisation_db, email: str | None) -> list[str]:
     normalized_email = normalize_access_email(email)
 
-    if not normalized_email or directory_db is None:
+    if not normalized_email or organisation_db is None:
         return []
 
-    return list(dict.fromkeys([
-        normalized_underling_email
-        for normalized_underling_email in (
-            normalize_access_email(member.email)
-            for member in get_underlings_until_depth(
-                directory_db,
-                normalized_email,
-                max_depth=TEAM_ACTIONS_MAX_DEPTH,
-            )
-        )
-        if normalized_underling_email
-    ]))
+    return get_direct_report_emails_for_team_scope(organisation_db, normalized_email)
 
 
 def get_requester_aliases(db, normalized_email: str | None, directory_db=None) -> list[str]:
@@ -50,6 +39,7 @@ async def search_actions_service(
     email: str | None = None,
     scope: str | None = None,
     directory_db=None,
+    organisation_db=None,
     user_role: str | None = None,
 ):
     if not query or query.strip() == "":
@@ -96,7 +86,7 @@ async def search_actions_service(
         filters.append(email_responsable == normalized_email)
 
     if normalized_scope == "team":
-        underling_emails = get_team_scope_emails(directory_db, normalized_email)
+        underling_emails = get_team_scope_emails(organisation_db, normalized_email)
 
         if not underling_emails:
             return []

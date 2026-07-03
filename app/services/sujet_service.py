@@ -20,6 +20,7 @@ from app.services.action_status_logic_service import (
     get_action_visible_from_home_predicate,
     get_normalized_action_status_expression,
 )
+from app.services.team_scope_service import get_direct_report_emails_for_team_scope
 
 
 TEAM_ACTIONS_MAX_DEPTH = 2
@@ -555,25 +556,18 @@ def serialize_root_sujet_row(
     }
 
 
-def get_scope_emails_for_team(email: str | None, directory_db) -> list[str]:
-    from app.services.directory_service import get_underlings_until_depth
-
+def get_scope_emails_for_team(email: str | None, organisation_db) -> list[str]:
     normalized_email = normalize_scope_email(email)
 
-    if not normalized_email:
+    if not normalized_email or organisation_db is None:
         return []
 
-    underlings = get_underlings_until_depth(
-        directory_db,
-        normalized_email,
-        max_depth=TEAM_ACTIONS_MAX_DEPTH,
+    return normalize_scope_emails(
+        get_direct_report_emails_for_team_scope(
+            organisation_db,
+            normalized_email,
+        )
     )
-
-    return normalize_scope_emails([
-        member.email
-        for member in underlings
-        if member.email
-    ])
 
 
 def normalize_home_scope(scope: str | None) -> str:
@@ -592,6 +586,7 @@ def build_scoped_actions_for_home_scope(
     sujet_tree=None,
     db: Session | None = None,
     user_role: str | None = None,
+    organisation_db=None,
 ):
     normalized_email = normalize_scope_email(email)
     normalized_scope = normalize_home_scope(scope)
@@ -609,7 +604,7 @@ def build_scoped_actions_for_home_scope(
         return None
 
     if normalized_scope == "team":
-        scope_emails = get_scope_emails_for_team(normalized_email, directory_db)
+        scope_emails = get_scope_emails_for_team(normalized_email, organisation_db)
 
         if not scope_emails:
             return None
@@ -671,6 +666,7 @@ async def get_home_summary_service(
     db: Session,
     directory_db,
     user_role: str | None = None,
+    organisation_db=None,
 ):
     include_hidden_closed = normalize_home_scope(scope) == "all" and is_admin_role(user_role)
     scoped_actions = build_scoped_actions_for_home_scope(
@@ -679,6 +675,7 @@ async def get_home_summary_service(
         directory_db=directory_db,
         db=db,
         user_role=user_role,
+        organisation_db=organisation_db,
     )
 
     if scoped_actions is None:
@@ -750,6 +747,7 @@ async def getSujetsRacineService(
     scope: str = "my",
     directory_db=None,
     user_role: str | None = None,
+    organisation_db=None,
 ):
     include_hidden_closed = normalize_home_scope(scope) == "all" and is_admin_role(user_role)
     scoped_actions = build_scoped_actions_for_home_scope(
@@ -758,6 +756,7 @@ async def getSujetsRacineService(
         directory_db=directory_db,
         db=db,
         user_role=user_role,
+        organisation_db=organisation_db,
     )
 
     if scoped_actions is None:
@@ -824,6 +823,7 @@ async def get_sous_sujets_by_sujet_id_service(
     directory_db=None,
     status: str | None = None,
     user_role: str | None = None,
+    organisation_db=None,
 ):
     include_hidden_closed = normalize_home_scope(scope) == "all" and is_admin_role(user_role)
     parent_sujet_ids = get_sujet_logical_group_ids(db, sujet_id)
@@ -858,6 +858,7 @@ async def get_sous_sujets_by_sujet_id_service(
         sujet_tree=sujet_tree,
         db=db,
         user_role=user_role,
+        organisation_db=organisation_db,
     )
 
     if scoped_actions is None:
@@ -919,7 +920,7 @@ async def get_sous_sujets_by_sujet_id_service(
 async def get_team_sujets_racine_service(
     email: str,
     db: Session,
-    directory_db,
+    organisation_db,
     status: str | None = None,
     user_role: str | None = None,
 ):
@@ -927,7 +928,7 @@ async def get_team_sujets_racine_service(
     scoped_actions = build_scoped_actions_for_home_scope(
         email=email,
         scope="team",
-        directory_db=directory_db,
+        organisation_db=organisation_db,
         db=db,
         user_role=user_role,
     )

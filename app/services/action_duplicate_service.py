@@ -2,9 +2,10 @@ import datetime
 import json
 import logging
 import re
+import unicodedata
 from collections import defaultdict
 
-from sqlalchemy import and_, func, or_
+from sqlalchemy import func
 
 from app.models.action import Action
 from app.models.sujet import Sujet
@@ -14,7 +15,7 @@ from app.services.action_status_logic_service import (
     get_normalized_action_status_expression,
     normalize_action_status,
 )
-from app.services.directory_service import get_underlings_until_depth
+from app.services.team_scope_service import get_direct_report_emails_for_team_scope
 
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,11 @@ def _normalize_email(value: str | None) -> str | None:
 
 def normalize_action_duplicate_title(value: str | None) -> str:
     text = str(value or "").strip().lower()
+    text = "".join(
+        character
+        for character in unicodedata.normalize("NFKD", text)
+        if not unicodedata.combining(character)
+    )
     text = _CONSOLIDATED_PREFIX_RE.sub("", text).strip()
     text = _PUNCTUATION_RE.sub(" ", text)
     text = _SPACE_RE.sub(" ", text).strip()
@@ -47,6 +53,10 @@ def normalize_action_duplicate_title(value: str | None) -> str:
 
 def _is_closed_status(status: str | None) -> bool:
     return normalize_action_status(status) == "closed"
+
+
+def _is_closed_action(action: Action) -> bool:
+    return _is_closed_status(action.status) or action.closed_date is not None
 
 
 def _json_safe(value):
@@ -135,9 +145,13 @@ def _action_to_duplicate_dict(action: Action, sujet_info: dict | None = None):
 def _candidate_query(
     db,
     include_deleted: bool = False,
+    include_closed: bool = False,
 ):
-    status_expr = get_normalized_action_status_expression(Action)
-    query = db.query(Action).filter(status_expr != "closed")
+    query = db.query(Action)
+
+    if not include_closed:
+        status_expr = get_normalized_action_status_expression(Action)
+        query = query.filter(status_expr != "closed").filter(Action.closed_date.is_(None))
 
     if not include_deleted:
         query = query.filter(get_action_active_predicate(Action))
@@ -152,13 +166,18 @@ def find_duplicate_action(
     titre: str | None,
     exclude_action_id: int | None = None,
     email_responsable: str | None = None,
+    email_demandeur: str | None = None,
 ):
     normalized_title = normalize_action_duplicate_title(titre)
 
     if not normalized_title:
         return None
 
-    query = _candidate_query(db, include_deleted=False).filter(Action.sujet_id == sujet_id)
+    query = _candidate_query(
+        db,
+        include_deleted=False,
+        include_closed=False,
+    ).filter(Action.sujet_id == sujet_id)
 
     if parent_action_id is None:
         query = query.filter(Action.parent_action_id.is_(None))
@@ -168,6 +187,10 @@ def find_duplicate_action(
     normalized_responsible = _normalize_email(email_responsable)
     if normalized_responsible:
         query = query.filter(func.lower(func.coalesce(Action.email_responsable, "")) == normalized_responsible)
+
+    normalized_requester = _normalize_email(email_demandeur)
+    if normalized_requester:
+        query = query.filter(func.lower(func.coalesce(Action.email_demandeur, "")) == normalized_requester)
 
     if exclude_action_id is not None:
         query = query.filter(Action.id != exclude_action_id)
@@ -213,6 +236,7 @@ def find_or_update_duplicate_action(
         parent_action_id=parent_action_id,
         titre=titre,
         email_responsable=values.get("email_responsable"),
+        email_demandeur=values.get("email_demandeur"),
     )
 
     if not existing_action:
@@ -254,7 +278,7 @@ def find_or_update_duplicate_action(
     return existing_action, updated_fields
 
 
-def _scope_email_values(email: str | None, scope: str, directory_db) -> set[str]:
+def _scope_email_values(email: str | None, scope: str, organisation_db) -> set[str]:
     normalized_email = _normalize_email(email)
 
     if not normalized_email:
@@ -263,21 +287,19 @@ def _scope_email_values(email: str | None, scope: str, directory_db) -> set[str]
     if scope != "team":
         return {normalized_email}
 
-    if directory_db is None:
+    if organisation_db is None:
         return set()
 
-    underlings = get_underlings_until_depth(directory_db, normalized_email, max_depth=2)
     return {
-        normalized_underling
-        for normalized_underling in (
-            _normalize_email(getattr(member, "email", None))
-            for member in underlings
+        direct_email
+        for direct_email in get_direct_report_emails_for_team_scope(
+            organisation_db,
+            normalized_email,
         )
-        if normalized_underling
     }
 
 
-def _apply_scope_filter(query, email: str | None, scope: str, directory_db):
+def _apply_scope_filter(query, email: str | None, scope: str, organisation_db):
     normalized_scope = (scope or "all").strip().lower()
     normalized_email = _normalize_email(email)
     email_responsable = func.lower(func.coalesce(Action.email_responsable, ""))
@@ -294,7 +316,7 @@ def _apply_scope_filter(query, email: str | None, scope: str, directory_db):
         return query.filter(email_demandeur == normalized_email)
 
     if normalized_scope == "team":
-        team_emails = _scope_email_values(email, "team", directory_db)
+        team_emails = _scope_email_values(email, "team", organisation_db)
         if not team_emails:
             return query.filter(False)
         return query.filter(email_responsable.in_(team_emails))
@@ -302,31 +324,14 @@ def _apply_scope_filter(query, email: str | None, scope: str, directory_db):
     return query
 
 
-def _identity_keys_for_scope(action: Action, scope: str):
-    normalized_scope = (scope or "all").strip().lower()
-    responsible_email = _normalize_email(action.email_responsable)
-    requester_email = _normalize_email(action.email_demandeur)
-
-    if normalized_scope in {"responsible", "team"}:
-        return [("responsible", responsible_email)] if responsible_email else []
-
-    if normalized_scope == "requester":
-        return [("requester", requester_email)] if requester_email else []
-
-    keys = []
-    if responsible_email:
-        keys.append(("responsible", responsible_email))
-    if requester_email:
-        keys.append(("requester", requester_email))
-    return keys
-
-
 def get_duplicate_action_groups_service(
     db,
     email: str | None = None,
     scope: str | None = None,
     include_deleted: bool = False,
+    include_closed: bool = False,
     directory_db=None,
+    organisation_db=None,
     limit: int = 100,
 ) -> dict:
     normalized_scope = (scope or "all").strip().lower()
@@ -335,10 +340,14 @@ def get_duplicate_action_groups_service(
 
     actions = (
         _apply_scope_filter(
-            _candidate_query(db, include_deleted=include_deleted),
+            _candidate_query(
+                db,
+                include_deleted=include_deleted,
+                include_closed=include_closed,
+            ),
             email=email,
             scope=normalized_scope,
-            directory_db=directory_db,
+            organisation_db=organisation_db,
         )
         .order_by(Action.sujet_id.asc(), Action.created_at.asc().nullsfirst(), Action.id.asc())
         .all()
@@ -354,19 +363,15 @@ def get_duplicate_action_groups_service(
         sujet_info = sujet_info_by_id.get(action.sujet_id, {})
         root_sujet_key = sujet_info.get("root_sujet_id") or action.sujet_id
         due_date_key = action.due_date.isoformat() if action.due_date else None
-
-        for identity_type, identity_value in _identity_keys_for_scope(action, normalized_scope):
-            if not identity_value:
-                continue
-
-            key = (
-                normalized_title,
-                root_sujet_key,
-                due_date_key,
-                identity_type,
-                identity_value,
-            )
-            buckets[key].append(action)
+        key = (
+            normalized_title,
+            root_sujet_key,
+            action.parent_action_id or 0,
+            due_date_key,
+            _normalize_email(action.email_responsable) or "",
+            _normalize_email(action.email_demandeur) or "",
+        )
+        buckets[key].append(action)
 
     result_groups = []
     seen_action_sets = set()
@@ -381,15 +386,23 @@ def get_duplicate_action_groups_service(
             continue
         seen_action_sets.add(action_id_tuple)
 
-        normalized_title, root_sujet_id, due_date_key, identity_type, identity_value = key
+        (
+            normalized_title,
+            root_sujet_id,
+            parent_action_id,
+            due_date_key,
+            responsible_email,
+            requester_email,
+        ) = key
         keep_oldest = sorted_actions[0]
         result_groups.append({
             "group_key": {
                 "normalized_title": normalized_title,
                 "root_sujet_id": root_sujet_id,
+                "parent_action_id": None if parent_action_id == 0 else parent_action_id,
                 "due_date": due_date_key,
-                "identity_type": identity_type,
-                "identity_value": identity_value,
+                "email_responsable": responsible_email or None,
+                "email_demandeur": requester_email or None,
             },
             "count": len(sorted_actions),
             "action_ids": [action.id for action in sorted_actions],
@@ -412,17 +425,22 @@ def get_duplicate_action_groups_service(
         "scope": normalized_scope,
         "email": _normalize_email(email),
         "include_deleted": include_deleted,
+        "include_closed": include_closed,
         "duplicate_group_count": len(result_groups),
         "groups": result_groups,
     }
 
 
-def _build_duplicate_resolution_details(kept_action_id: int, group_action_ids: list[int]):
+def _build_duplicate_resolution_details(
+    kept_action_id: int,
+    group_action_ids: list[int],
+    keep: str = "oldest",
+):
     return json.dumps(
         {
             "kept_action_id": kept_action_id,
             "group_action_ids": group_action_ids,
-            "strategy": "soft_delete_duplicates_keep_oldest",
+            "strategy": f"soft_delete_duplicates_keep_{keep}",
         },
         default=_json_safe,
         ensure_ascii=False,
@@ -435,8 +453,16 @@ def resolve_duplicate_actions_service(
     dry_run: bool = True,
     strategy: str = "soft_delete_duplicates_keep_oldest",
     current_user=None,
+    keep: str = "oldest",
+    include_closed: bool = False,
 ) -> dict:
-    if strategy != "soft_delete_duplicates_keep_oldest":
+    normalized_keep = (keep or "oldest").strip().lower()
+    if strategy == "soft_delete_duplicates_keep_newest" and keep == "oldest":
+        normalized_keep = "newest"
+    if normalized_keep not in {"oldest", "newest"}:
+        raise ValueError("Unsupported keep value.")
+
+    if strategy not in {"soft_delete_duplicates_keep_oldest", "soft_delete_duplicates_keep_newest"}:
         raise ValueError("Unsupported duplicate resolution strategy.")
 
     unique_action_ids = list(dict.fromkeys(action_ids or []))
@@ -470,7 +496,7 @@ def resolve_duplicate_actions_service(
             skipped.append({"id": action.id, "reason": "already_deleted"})
             continue
 
-        if _is_closed_status(action.status):
+        if not include_closed and _is_closed_action(action):
             skipped.append({"id": action.id, "reason": "closed_actions_are_not_deleted_by_default"})
             continue
 
@@ -487,7 +513,11 @@ def resolve_duplicate_actions_service(
             "skipped": skipped,
         }
 
-    sorted_actions = sorted(candidate_actions, key=_action_sort_key)
+    sorted_actions = sorted(
+        candidate_actions,
+        key=_action_sort_key,
+        reverse=normalized_keep == "newest",
+    )
     kept_action = sorted_actions[0]
     duplicate_actions = sorted_actions[1:]
     group_action_ids = [action.id for action in sorted_actions]
@@ -495,7 +525,11 @@ def resolve_duplicate_actions_service(
     now = datetime.datetime.now(datetime.timezone.utc)
 
     if not dry_run:
-        details = _build_duplicate_resolution_details(kept_action.id, group_action_ids)
+        details = _build_duplicate_resolution_details(
+            kept_action.id,
+            group_action_ids,
+            keep=normalized_keep,
+        )
         log_action_event(
             db=db,
             action_id=kept_action.id,
@@ -526,7 +560,9 @@ def resolve_duplicate_actions_service(
     sujet_info_by_id = _get_sujet_maps(db, {action.sujet_id for action in sorted_actions})
     return {
         "dry_run": dry_run,
-        "strategy": strategy,
+        "strategy": f"soft_delete_duplicates_keep_{normalized_keep}",
+        "keep": normalized_keep,
+        "include_closed": include_closed,
         "changed": bool(duplicate_actions),
         "kept_action": _action_to_duplicate_dict(
             kept_action,

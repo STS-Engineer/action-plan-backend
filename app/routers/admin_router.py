@@ -34,6 +34,11 @@ from app.services.dashboard_service import (
     get_dashboard_action_status_debug_service,
     get_dashboard_diagnostics_service,
 )
+from app.services.sujet_duplicate_service import (
+    get_duplicate_sujet_groups_service,
+    merge_duplicate_sujets_service,
+)
+from app.services.team_scope_service import get_team_scope_debug_service
 
 
 router = APIRouter(prefix="/api/admin", tags=["Admin"])
@@ -61,6 +66,12 @@ class DuplicateResolveRequest(BaseModel):
 class EscalationRunRequest(BaseModel):
     dry_run: bool = True
     test_email: EmailStr | None = None
+
+
+class SujetDuplicateMergeRequest(BaseModel):
+    dry_run: bool = True
+    keep_sujet_id: int
+    merge_sujet_ids: list[int]
 
 
 @router.post("/promote-user")
@@ -142,6 +153,16 @@ async def getDashboardActionStatusDebug(
     return get_dashboard_action_status_debug_service(db, action_id)
 
 
+@router.get("/team-scope/debug")
+async def getTeamScopeDebug(
+    email: str = Query(...),
+    db: Session = Depends(get_db),
+    organisation_db: Session | None = Depends(get_organisation_db),
+    current_user: User = Depends(require_admin_user),
+):
+    return get_team_scope_debug_service(db, organisation_db, email)
+
+
 @router.get("/reminders/smtp-config")
 async def getSmtpConfig(
     current_user: User = Depends(require_admin_user),
@@ -198,8 +219,10 @@ async def getActionDuplicates(
     email: str | None = Query(None),
     scope: str | None = Query("all"),
     include_deleted: bool = Query(False),
+    include_closed: bool = Query(False),
     db: Session = Depends(get_db),
     directory_db: Session = Depends(get_directory_db),
+    organisation_db: Session | None = Depends(get_organisation_db),
     current_user: User = Depends(require_admin_user),
 ):
     return get_duplicate_action_groups_service(
@@ -207,7 +230,9 @@ async def getActionDuplicates(
         email=email,
         scope=scope,
         include_deleted=include_deleted,
+        include_closed=include_closed,
         directory_db=directory_db,
+        organisation_db=organisation_db,
     )
 
 
@@ -227,6 +252,29 @@ async def resolveActionDuplicates(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/sujets/duplicates")
+async def getSujetDuplicates(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_user),
+):
+    return get_duplicate_sujet_groups_service(db)
+
+
+@router.post("/sujets/duplicates/merge")
+async def mergeSujetDuplicates(
+    payload: SujetDuplicateMergeRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_user),
+):
+    return merge_duplicate_sujets_service(
+        db,
+        dry_run=payload.dry_run,
+        keep_sujet_id=payload.keep_sujet_id,
+        merge_sujet_ids=payload.merge_sujet_ids,
+        current_user=current_user,
+    )
 
 
 @router.get("/escalations/olivier-audit")
