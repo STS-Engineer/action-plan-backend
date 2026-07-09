@@ -21,9 +21,9 @@ from app.services.organisation_hierarchy_service import (
 
 PRODUCTION_HIERARCHY_SOURCE = {
     "database": "Organisation_DB",
-    "view": "public.v_personne_complete",
+    "view": "public.v_people_with_boss",
     "person_lookup": "lower(trim(email))",
-    "manager_lookup": "manager_hierarchique name -> personne",
+    "manager_lookup": "boss_email -> email; fallback boss_person -> person",
 }
 DETAILED_ESCALATION_EMAIL_EVENT_TYPE = "action_escalation_email_sent"
 
@@ -214,7 +214,7 @@ def get_escalation_source_status_service(organisation_db):
             organisation_db.execute(text("SELECT 1")).scalar()
             connection_ok = True
             organisation_db.execute(
-                text("SELECT 1 FROM public.v_personne_complete LIMIT 1")
+                text("SELECT 1 FROM public.v_people_with_boss LIMIT 1")
             ).first()
             view_accessible = True
         except Exception as exc:
@@ -226,7 +226,7 @@ def get_escalation_source_status_service(organisation_db):
     return {
         "organisation_db_configured": is_organisation_db_configured(),
         "organisation_db_connection_ok": connection_ok,
-        "view": "public.v_personne_complete",
+        "view": "public.v_people_with_boss",
         "view_accessible": view_accessible,
         "fallback_enabled": False,
         "last_error": last_error,
@@ -269,15 +269,10 @@ def get_escalation_hierarchy_debug_service(db, organisation_db, action_id: int):
         },
         "warnings": resolution.get("warnings") or [],
         "warning_types": _warning_types(resolution.get("warnings")),
-        "manager_hierarchique_values": _combined_chain_values(
-            resolution,
-            "manager_hierarchique",
-        ),
-        "manager_fonctionnel_values": _combined_chain_values(
-            resolution,
-            "manager_fonctionnel",
-        ),
-        "role_parent_values": _combined_chain_values(resolution, "role_parent"),
+        "boss_person_values": _combined_chain_values(resolution, "boss_person"),
+        "boss_email_values": _combined_chain_values(resolution, "boss_email"),
+        "boss_role_values": _combined_chain_values(resolution, "boss_role"),
+        "hierarchy_path_values": _combined_chain_values(resolution, "hierarchy_path"),
         "olivier_reached": {
             "selected_recipient": bool(
                 normalize_email(resolution.get("to_email")) == OLIVIER_EMAIL

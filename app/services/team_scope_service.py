@@ -43,6 +43,9 @@ def _dedupe_people_by_email_or_assignment(people: list[dict]) -> list[dict]:
 
     for person in sorted(people, key=_direct_report_sort_key):
         email = normalize_email(person.get("email"))
+        if not is_valid_email(email):
+            continue
+
         key = f"email:{email}" if email else f"assignment:{person.get('assignment_id')}"
 
         if key in seen:
@@ -62,7 +65,7 @@ def _query_people_with_manager(organisation_db) -> list[dict]:
         text(
             PERSON_SELECT
             + """
-WHERE nullif(trim(coalesce(manager_hierarchique, '')), '') IS NOT NULL
+WHERE nullif(trim(coalesce(boss_email, '')), '') IS NOT NULL
 ORDER BY is_primary DESC NULLS LAST, personne ASC NULLS LAST, assignment_id ASC NULLS LAST
 """
         )
@@ -86,10 +89,9 @@ def get_direct_reports_for_manager_email(organisation_db, manager_email: str | N
 
     lookup = find_person_by_email(organisation_db, normalized_email)
     selected_person = lookup.get("selected")
-    selected_name = normalize_name((selected_person or {}).get("personne"))
     warnings = [*lookup.get("warnings", [])]
 
-    if not selected_person or not selected_name:
+    if not selected_person or not normalized_email:
         return {
             "source": TEAM_SCOPE_SOURCE,
             "company_members_used": False,
@@ -99,7 +101,7 @@ def get_direct_reports_for_manager_email(organisation_db, manager_email: str | N
             "direct_report_emails": [],
             "warnings": [
                 *warnings,
-                {"type": "manager_not_found_in_v_personne_complete"},
+                {"type": "manager_not_found_in_v_people_with_boss"},
             ],
         }
 
@@ -107,7 +109,10 @@ def get_direct_reports_for_manager_email(organisation_db, manager_email: str | N
     direct_reports = _dedupe_people_by_email_or_assignment([
         person
         for person in people
-        if normalize_name(person.get("manager_hierarchique")) == selected_name
+        if (
+            normalize_email(person.get("boss_email")) == normalized_email
+            and normalize_email(person.get("email")) != normalized_email
+        )
     ])
     direct_report_emails = [
         email
@@ -193,7 +198,7 @@ def get_team_scope_debug_service(db, organisation_db, email: str) -> dict:
 
     return {
         "hierarchy_source": TEAM_SCOPE_SOURCE,
-        "source": "public.v_personne_complete",
+        "source": "public.v_people_with_boss",
         "company_members_used": False,
         "email": normalize_email(email),
         "selected_person_row": direct_scope.get("selected_person"),
@@ -206,7 +211,10 @@ def get_team_scope_debug_service(db, organisation_db, email: str) -> dict:
                 "role_cible": person.get("role_cible"),
                 "assignment_id": person.get("assignment_id"),
                 "is_primary": person.get("is_primary"),
-                "manager_hierarchique": person.get("manager_hierarchique"),
+                "boss_person": person.get("boss_person"),
+                "boss_email": normalize_email(person.get("boss_email")),
+                "boss_role": person.get("boss_role"),
+                "hierarchy_path": person.get("hierarchy_path"),
                 "hr_site": person.get("hr_site"),
             }
             for person in direct_scope.get("direct_reports") or []

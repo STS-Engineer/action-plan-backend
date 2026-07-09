@@ -6,7 +6,7 @@ from sqlalchemy import text
 
 
 OLIVIER_EMAIL = "olivier.spicker@avocarbon.com"
-ORGANISATION_SOURCE = "v_personne_complete"
+ORGANISATION_SOURCE = "v_people_with_boss"
 UNAVAILABLE_SOURCE = "unavailable"
 INVALID_EMAIL_VALUES = {
     "",
@@ -20,10 +20,26 @@ INVALID_EMAIL_VALUES = {
 }
 
 PERSON_SELECT = """
-SELECT people_id, personne, email, role, role_cible, role_parent, is_primary,
-       manager_hierarchique, manager_role, manager_fonctionnel,
-       assignment_id, travaille_a, paye_par, hr_site
-FROM public.v_personne_complete
+SELECT people_id,
+       person AS personne,
+       email,
+       role_name AS role,
+       role_name AS role_cible,
+       hierarchy_path AS role_parent,
+       (lower(coalesce(role_name, '')) = 'ceo' OR lower(coalesce(role_level, '')) = 'executive') AS is_primary,
+       boss_person AS manager_hierarchique,
+       boss_role AS manager_role,
+       hierarchy_path AS manager_fonctionnel,
+       people_id AS assignment_id,
+       factory AS travaille_a,
+       country AS paye_par,
+       factory AS hr_site,
+       boss_email,
+       boss_person,
+       boss_role,
+       hierarchy_path,
+       role_level
+FROM public.v_people_with_boss
 """
 
 
@@ -113,10 +129,28 @@ def _assignment_sort_key(person: dict[str, Any]):
         assignment_id = 999999999999
 
     return (
-        0 if person.get("is_primary") else 1,
         0 if is_valid_email(person.get("email")) else 1,
+        _role_sort_rank(person),
+        0 if person.get("is_primary") else 1,
         assignment_id,
     )
+
+
+def _role_sort_rank(person: dict[str, Any]) -> int:
+    role = normalize_name(person.get("role"))
+    role_level = normalize_name(person.get("role_level"))
+
+    if normalize_email(person.get("email")) == OLIVIER_EMAIL and role == "CEO":
+        return 0
+    if role == "CEO" or role_level == "EXECUTIVE":
+        return 1
+    if role_level == "VP" or (role or "").startswith("VP "):
+        return 2
+    if role_level == "MANAGER":
+        return 3
+    if role_level == "PROFESSIONAL":
+        return 4
+    return 5
 
 
 def _select_person(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -204,8 +238,9 @@ def _is_ceo_or_olivier(person: dict[str, Any] | None) -> bool:
     email = normalize_email(person.get("email"))
     role = normalize_name(person.get("role"))
     role_cible = normalize_name(person.get("role_cible"))
+    role_level = normalize_name(person.get("role_level"))
 
-    return email == OLIVIER_EMAIL or role == "CEO" or role_cible == "CEO"
+    return email == OLIVIER_EMAIL or role == "CEO" or role_cible == "CEO" or role_level == "EXECUTIVE"
 
 
 def _unavailable_chain(email: str | None, reason: str):
@@ -253,35 +288,71 @@ def build_organisation_manager_chain(organisation_db, email: str | None):
             }
 
         current = selected
+        if _is_ceo_or_olivier(current):
+            stop_reason = (
+                "olivier_reached"
+                if normalize_email(current.get("email")) == OLIVIER_EMAIL
+                else "ceo_reached"
+            )
+            return {
+                "source": ORGANISATION_SOURCE,
+                "input_email": normalize_email(email),
+                "lookup": lookup,
+                "chain": chain,
+                "chain_count": 0,
+                "warnings": warnings,
+                "stop_reason": stop_reason,
+                "reaches_olivier": normalize_email(current.get("email")) == OLIVIER_EMAIL,
+            }
+
         current_key = _person_key(current)
         if current_key:
             visited.add(current_key)
 
         while current and len(chain) < 30:
-            manager_name = current.get("manager_hierarchique")
-            if not manager_name:
-                stop_reason = "missing_manager_hierarchique"
+            boss_email = normalize_email(current.get("boss_email"))
+            boss_person = current.get("boss_person") or current.get("manager_hierarchique")
+            if boss_email:
+                manager_lookup = find_person_by_email(organisation_db, boss_email)
+                lookup_value = boss_email
+                lookup_field = "boss_email"
+            elif boss_person:
+                manager_lookup = find_person_by_name(organisation_db, boss_person)
+                lookup_value = boss_person
+                lookup_field = "boss_person"
+                warnings.append({
+                    "type": "missing_boss_email_fallback_to_boss_person",
+                    "boss_person": boss_person,
+                    "personne": current.get("personne"),
+                    "email": current.get("email"),
+                })
+            else:
+                stop_reason = "missing_boss_email"
                 break
 
-            manager_lookup = find_person_by_name(organisation_db, manager_name)
             warnings.extend(manager_lookup.get("warnings", []))
             manager = manager_lookup.get("selected")
 
             if not manager:
                 warnings.append({
-                    "type": "manager_hierarchique_not_found",
-                    "manager_hierarchique": manager_name,
+                    "type": "boss_not_found",
+                    lookup_field: lookup_value,
+                    "boss_email": boss_email,
+                    "boss_person": boss_person,
                     "personne": current.get("personne"),
                     "email": current.get("email"),
                 })
-                stop_reason = "manager_hierarchique_not_found"
+                stop_reason = "boss_not_found"
                 break
 
+            is_top_manager = _is_ceo_or_olivier(manager)
             manager_key = _person_key(manager)
-            if manager_key and manager_key in visited:
+            if not is_top_manager and manager_key and manager_key in visited:
                 warnings.append({
                     "type": "loop_detected",
-                    "manager_hierarchique": manager_name,
+                    lookup_field: lookup_value,
+                    "boss_email": boss_email,
+                    "boss_person": boss_person,
                     "personne": manager.get("personne"),
                     "email": manager.get("email"),
                 })
@@ -293,23 +364,28 @@ def build_organisation_manager_chain(organisation_db, email: str | None):
 
             entry = {
                 "level": len(chain) + 1,
-                "manager_lookup_name": manager_name,
+                "manager_lookup_name": boss_person,
+                "boss_lookup_email": boss_email,
+                "boss_lookup_person": boss_person,
+                "boss_lookup_used": lookup_field,
                 "lookup": manager_lookup,
                 "person": manager,
                 "email": normalize_email(manager.get("email")),
                 "valid_email": is_valid_email(manager.get("email")),
-                "is_ceo_or_olivier": _is_ceo_or_olivier(manager),
+                "is_ceo_or_olivier": is_top_manager,
             }
             chain.append(entry)
 
             if not entry["valid_email"]:
                 warnings.append({
-                    "type": "manager_has_no_valid_email",
-                    "manager_hierarchique": manager_name,
+                    "type": "boss_has_no_valid_email",
+                    lookup_field: lookup_value,
+                    "boss_email": boss_email,
+                    "boss_person": boss_person,
                     "personne": manager.get("personne"),
                     "email": manager.get("email"),
                 })
-                stop_reason = "manager_has_no_valid_email"
+                stop_reason = "boss_has_no_valid_email"
                 break
 
             if entry["is_ceo_or_olivier"]:
