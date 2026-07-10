@@ -30,7 +30,7 @@ PENDING_STATUS = "pending"
 
 
 def _read_escalation_emails_enabled() -> bool:
-    return os.getenv("ESCALATION_EMAILS_ENABLED", "true").strip().lower() in {
+    return os.getenv("ESCALATION_EMAILS_ENABLED", "false").strip().lower() in {
         "1",
         "true",
         "yes",

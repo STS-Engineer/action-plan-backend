@@ -191,7 +191,7 @@ def _read_daily_reminders_enabled_env() -> bool:
 
 
 def _read_escalation_emails_enabled_env() -> bool:
-    return os.getenv("ESCALATION_EMAILS_ENABLED", "true").strip().lower() == "true"
+    return os.getenv("ESCALATION_EMAILS_ENABLED", "false").strip().lower() == "true"
 
 
 def _read_timezone_name() -> str:
