@@ -30,6 +30,7 @@ from app.services.action_priority_service import recalculate_all_priorities_serv
 from app.services.auth_service import normalize_email, require_admin_user
 from app.services.email_service import get_smtp_config_diagnostics, send_smtp_test_email
 from app.services.scheduler_service import get_scheduler_status, reload_scheduler
+from app.services.sujet_source_application_service import classify_null_sujet_source_applications
 from app.services.dashboard_service import (
     get_dashboard_action_status_debug_service,
     get_dashboard_diagnostics_service,
@@ -72,6 +73,10 @@ class SujetDuplicateMergeRequest(BaseModel):
     dry_run: bool = True
     keep_sujet_id: int
     merge_sujet_ids: list[int]
+
+
+class SujetSourceApplicationRunRequest(BaseModel):
+    dry_run: bool = False
 
 
 @router.post("/promote-user")
@@ -275,6 +280,23 @@ async def mergeSujetDuplicates(
         merge_sujet_ids=payload.merge_sujet_ids,
         current_user=current_user,
     )
+
+
+@router.get("/sujet-source-application/dry-run")
+async def dryRunSujetSourceApplicationClassifier(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_user),
+):
+    return classify_null_sujet_source_applications(db, dry_run=True)
+
+
+@router.post("/sujet-source-application/run")
+async def runSujetSourceApplicationClassifier(
+    payload: SujetSourceApplicationRunRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_user),
+):
+    return classify_null_sujet_source_applications(db, dry_run=payload.dry_run)
 
 
 @router.get("/escalations/olivier-audit")

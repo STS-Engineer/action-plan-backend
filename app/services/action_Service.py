@@ -98,14 +98,17 @@ def get_latest_action_history_map(db: Session, action_ids):
     return latest_history
 
 
-def action_to_dict(action, root_sujet=None, latest_history=None):
+def action_to_dict(action, root_sujet=None, latest_history=None, source_sujet=None):
     enrich_action_priority(action)
+
+    action_sujet = source_sujet or getattr(action, "sujet", None)
 
     payload = {
         **action.__dict__,
         "reaction_time_days": get_reaction_time_days(action.importance),
         "reaction_deadline": str(calculate_reaction_deadline(action.due_date, action.importance)) if action.due_date else None,
         "escalation_ready": is_escalation_ready(action),
+        "source_application": getattr(action_sujet, "source_application", None),
     }
 
     root_code = root_sujet.code if root_sujet and root_sujet.code else ""
@@ -125,10 +128,11 @@ def action_to_dict(action, root_sujet=None, latest_history=None):
     return payload
 
 
-def action_detail_to_dict(action, root_sujet=None, latest_history=None):
+def action_detail_to_dict(action, root_sujet=None, latest_history=None, source_sujet=None):
     enrich_action_priority(action)
 
     root_code = root_sujet.code if root_sujet and root_sujet.code else ""
+    action_sujet = source_sujet or getattr(action, "sujet", None)
 
     payload = {
         "id": action.id,
@@ -149,6 +153,7 @@ def action_detail_to_dict(action, root_sujet=None, latest_history=None):
         "importance": action.importance,
         "urgency": action.urgency,
         "escalation_level": action.escalation_level,
+        "source_application": getattr(action_sujet, "source_application", None),
         "corrective_action_app": root_code.startswith("8D"),
         "rm_stock_app": "AP-RAW-MATERIAL" in root_code,
     }
@@ -210,6 +215,7 @@ def build_sujet_path_info_map(db: Session, sujet_ids):
 
         path_info_by_sujet_id[sujet_id] = {
             "root_sujet": root_sujet,
+            "nearest_sujet": nearest_sujet,
             "root_sujet_title": root_sujet.titre if root_sujet else None,
             "sujet_title": nearest_sujet.titre if nearest_sujet else None,
             "topic_path": " > ".join(
@@ -443,6 +449,7 @@ async def get_filtered_actions_service(
         payload = action_to_dict(
             action,
             root_sujet=sujet_info.get("root_sujet"),
+            source_sujet=sujet_info.get("nearest_sujet"),
             latest_history=latest_history_by_action_id.get(action.id),
         )
         payload.pop("_sa_instance_state", None)
@@ -532,6 +539,7 @@ async def get_actions_by_sujet_id_service(
             action_to_dict(
                 action,
                 root_sujet=sujet_info.get("root_sujet"),
+                source_sujet=sujet_info.get("nearest_sujet"),
                 latest_history=latest_history_by_action_id.get(action.id),
             )
         )
@@ -577,6 +585,7 @@ async def get_action_by_id_service(
     return action_detail_to_dict(
         action,
         root_sujet=root_sujet,
+        source_sujet=sujet,
         latest_history=latest_history_by_action_id.get(action.id),
     )
 
@@ -620,10 +629,16 @@ async def get_sous_actions_by_action_id_service(
         db,
         [action.id for action in sous_actions],
     )
+    sujet_path_info_by_id = build_sujet_path_info_map(
+        db,
+        [action.sujet_id for action in sous_actions],
+    )
 
     return [
         action_to_dict(
             action,
+            root_sujet=sujet_path_info_by_id.get(action.sujet_id, {}).get("root_sujet"),
+            source_sujet=sujet_path_info_by_id.get(action.sujet_id, {}).get("nearest_sujet"),
             latest_history=latest_history_by_action_id.get(action.id),
         )
         for action in sous_actions
@@ -748,6 +763,7 @@ async def update_action_status_service(
     payload = action_to_dict(
         action,
         root_sujet=sujet_info.get("root_sujet"),
+        source_sujet=sujet_info.get("nearest_sujet"),
         latest_history=latest_history_by_action_id.get(action.id),
     )
     payload.pop("_sa_instance_state", None)
@@ -830,10 +846,16 @@ async def get_my_actions_service(email: str, db: Session):
         db,
         [action.id for action in actions],
     )
+    sujet_path_info_by_id = build_sujet_path_info_map(
+        db,
+        [action.sujet_id for action in actions],
+    )
 
     return [
         action_to_dict(
             action,
+            root_sujet=sujet_path_info_by_id.get(action.sujet_id, {}).get("root_sujet"),
+            source_sujet=sujet_path_info_by_id.get(action.sujet_id, {}).get("nearest_sujet"),
             latest_history=latest_history_by_action_id.get(action.id),
         )
         for action in actions
@@ -870,12 +892,18 @@ async def get_team_actions_service(email: str, db: Session, organisation_db):
         db,
         [action.id for action in actions],
     )
+    sujet_path_info_by_id = build_sujet_path_info_map(
+        db,
+        [action.sujet_id for action in actions],
+    )
 
     return {
         "team_members": len(underling_emails),
         "actions": [
             action_to_dict(
                 action,
+                root_sujet=sujet_path_info_by_id.get(action.sujet_id, {}).get("root_sujet"),
+                source_sujet=sujet_path_info_by_id.get(action.sujet_id, {}).get("nearest_sujet"),
                 latest_history=latest_history_by_action_id.get(action.id),
             )
             for action in actions

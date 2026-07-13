@@ -26,6 +26,7 @@ class Sujet(Base):
         server_default=func.now(),
     )
     inserted_by = Column(Text, nullable=False)
+    source_application = Column(Text, nullable=True)
 
     parent = relationship("Sujet", remote_side=[id], back_populates="children")
     children = relationship("Sujet", back_populates="parent")

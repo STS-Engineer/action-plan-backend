@@ -252,6 +252,7 @@ async def search_actions_service(
             action_to_dict(
                 action,
                 root_sujet=root_sujet,
+                source_sujet=sujet,
                 latest_history=latest_history_by_action_id.get(action.id),
             )
         )

@@ -126,6 +126,8 @@ def can_access_action(
 
 
 def action_access_summary(action):
+    sujet = getattr(action, "sujet", None)
+
     return {
         "id": action.id,
         "titre": action.titre,
@@ -138,4 +140,5 @@ def action_access_summary(action):
         "importance": action.importance,
         "urgency": action.urgency,
         "escalation_level": action.escalation_level,
+        "source_application": getattr(sujet, "source_application", None),
     }

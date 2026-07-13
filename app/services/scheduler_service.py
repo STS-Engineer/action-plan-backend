@@ -14,15 +14,18 @@ from app.services.action_overdue_service import update_overdue_actions_service
 from app.services.action_escalation_service import send_due_escalation_notifications_service
 from app.services.action_priority_service import recalculate_all_priorities_service
 from app.services.action_reminder_service import send_grouped_due_date_reminders_service
+from app.services.sujet_source_application_service import classify_null_sujet_source_applications
 
 
 DEFAULT_SCHEDULER_TIMEZONE = "Africa/Tunis"
 DAILY_REMINDER_JOB_ID = "daily_action_plan_reminders"
 DAILY_PRIORITY_RECALCULATION_JOB_ID = "daily_priority_recalculation"
 ESCALATION_CHECK_JOB_ID = "escalation_check"
+SOURCE_APPLICATION_CLASSIFIER_JOB_ID = "source_application_classifier"
 DAILY_REMINDER_LOCK_KEY = 7291001001
 DAILY_PRIORITY_RECALCULATION_LOCK_KEY = 7291001002
 ESCALATION_CHECK_LOCK_KEY = 7291001003
+SOURCE_APPLICATION_CLASSIFIER_LOCK_KEY = 7291001004
 
 logger = logging.getLogger(__name__)
 scheduler = BackgroundScheduler(timezone=ZoneInfo(DEFAULT_SCHEDULER_TIMEZONE))
@@ -169,6 +172,36 @@ async def escalation_check_job():
         lock_db.close()
 
 
+async def source_application_classifier_job():
+    lock_db = SessionLocal()
+    job_db = SessionLocal()
+    lock_acquired = False
+
+    try:
+        lock_acquired = _try_acquire_job_lock(
+            lock_db,
+            SOURCE_APPLICATION_CLASSIFIER_JOB_ID,
+            SOURCE_APPLICATION_CLASSIFIER_LOCK_KEY,
+        )
+        if not lock_acquired:
+            return
+
+        logger.info("[SCHEDULER] Executing job_id=%s", SOURCE_APPLICATION_CLASSIFIER_JOB_ID)
+        result = classify_null_sujet_source_applications(job_db, dry_run=False)
+        logger.info("[SCHEDULER] Source application classifier result=%s", result)
+    except Exception:
+        logger.exception("[SCHEDULER] Source application classifier failed.")
+    finally:
+        if lock_acquired:
+            _release_job_lock(
+                lock_db,
+                SOURCE_APPLICATION_CLASSIFIER_JOB_ID,
+                SOURCE_APPLICATION_CLASSIFIER_LOCK_KEY,
+            )
+        job_db.close()
+        lock_db.close()
+
+
 def _read_int_env(name: str, default: int) -> int:
     value = os.getenv(name)
 
@@ -194,6 +227,10 @@ def _read_escalation_emails_enabled_env() -> bool:
     return os.getenv("ESCALATION_EMAILS_ENABLED", "false").strip().lower() == "true"
 
 
+def _read_source_application_classifier_enabled_env() -> bool:
+    return os.getenv("SOURCE_APPLICATION_CLASSIFIER_ENABLED", "false").strip().lower() == "true"
+
+
 def _read_timezone_name() -> str:
     return os.getenv("SCHEDULER_TIMEZONE", DEFAULT_SCHEDULER_TIMEZONE).strip() or DEFAULT_SCHEDULER_TIMEZONE
 
@@ -205,6 +242,11 @@ def _read_scheduler_config():
     priority_minute = _read_int_env("DAILY_PRIORITY_RECALCULATION_MINUTE", daily_minute)
     escalation_hour = _read_int_env("ESCALATION_CHECK_HOUR", daily_hour)
     escalation_minute = _read_int_env("ESCALATION_CHECK_MINUTE", (daily_minute + 10) % 60)
+    source_application_hour = _read_int_env("SOURCE_APPLICATION_CLASSIFIER_HOUR", escalation_hour)
+    source_application_minute = _read_int_env(
+        "SOURCE_APPLICATION_CLASSIFIER_MINUTE",
+        (escalation_minute + 10) % 60,
+    )
 
     return {
         "scheduler_enabled_env": os.getenv("SCHEDULER_ENABLED", "false"),
@@ -213,6 +255,8 @@ def _read_scheduler_config():
         "daily_reminders_enabled": _read_daily_reminders_enabled_env(),
         "escalation_emails_enabled_env": os.getenv("ESCALATION_EMAILS_ENABLED", "true"),
         "escalation_emails_enabled": _read_escalation_emails_enabled_env(),
+        "source_application_classifier_enabled_env": os.getenv("SOURCE_APPLICATION_CLASSIFIER_ENABLED", "false"),
+        "source_application_classifier_enabled": _read_source_application_classifier_enabled_env(),
         "timezone": _read_timezone_name(),
         "daily_reminder_hour": daily_hour,
         "daily_reminder_minute": daily_minute,
@@ -220,6 +264,8 @@ def _read_scheduler_config():
         "priority_recalculation_minute": priority_minute,
         "escalation_check_hour": escalation_hour,
         "escalation_check_minute": escalation_minute,
+        "source_application_classifier_hour": source_application_hour,
+        "source_application_classifier_minute": source_application_minute,
     }
 
 
@@ -257,6 +303,8 @@ def get_scheduler_status():
         "daily_reminders_enabled": config["daily_reminders_enabled"],
         "escalation_emails_enabled_env": config["escalation_emails_enabled_env"],
         "escalation_emails_enabled": config["escalation_emails_enabled"],
+        "source_application_classifier_enabled_env": config["source_application_classifier_enabled_env"],
+        "source_application_classifier_enabled": config["source_application_classifier_enabled"],
         "scheduler_running": scheduler.running,
         "timezone": config["timezone"],
         "scheduler_timezone": str(getattr(scheduler, "timezone", "")),
@@ -272,13 +320,19 @@ def get_scheduler_status():
             "hour": config["escalation_check_hour"],
             "minute": config["escalation_check_minute"],
         },
+        "source_application_classifier_schedule": {
+            "hour": config["source_application_classifier_hour"],
+            "minute": config["source_application_classifier_minute"],
+        },
         "registered_jobs": jobs,
         "daily_reminder_job_id": DAILY_REMINDER_JOB_ID,
         "priority_recalculation_job_id": DAILY_PRIORITY_RECALCULATION_JOB_ID,
         "escalation_job_id": ESCALATION_CHECK_JOB_ID,
+        "source_application_classifier_job_id": SOURCE_APPLICATION_CLASSIFIER_JOB_ID,
         "daily_job_registered": DAILY_REMINDER_JOB_ID in registered_job_ids,
         "priority_recalculation_job_registered": DAILY_PRIORITY_RECALCULATION_JOB_ID in registered_job_ids,
         "escalation_job_registered": ESCALATION_CHECK_JOB_ID in registered_job_ids,
+        "source_application_classifier_job_registered": SOURCE_APPLICATION_CLASSIFIER_JOB_ID in registered_job_ids,
         "weekly_reports_enabled": False,
         "weekly_job_registered": False,
         "last_error": _scheduler_last_error,
@@ -292,7 +346,9 @@ def _log_scheduler_status(started: bool):
         "[SCHEDULER] Config SCHEDULER_ENABLED=%s timezone=%s "
         "DAILY_REMINDERS_ENABLED=%s daily=%02d:%02d "
         "priority=%02d:%02d escalation=%02d:%02d ESCALATION_EMAILS_ENABLED=%s "
+        "source_application_classifier_enabled=%s source_application_classifier=%02d:%02d "
         "daily_job_registered=%s priority_job_registered=%s escalation_job_registered=%s "
+        "source_application_classifier_job_registered=%s "
         "weekly_job_registered=%s jobs=%s started=%s last_error=%s",
         status["scheduler_enabled_env"],
         status["timezone"],
@@ -304,9 +360,13 @@ def _log_scheduler_status(started: bool):
         status["escalation_check_schedule"]["hour"],
         status["escalation_check_schedule"]["minute"],
         status["escalation_emails_enabled_env"],
+        status["source_application_classifier_enabled_env"],
+        status["source_application_classifier_schedule"]["hour"],
+        status["source_application_classifier_schedule"]["minute"],
         status["daily_job_registered"],
         status["priority_recalculation_job_registered"],
         status["escalation_job_registered"],
+        status["source_application_classifier_job_registered"],
         status["weekly_job_registered"],
         status["registered_jobs"],
         started,
@@ -371,6 +431,21 @@ def _configure_scheduler(config, timezone):
         logger.info("[SCHEDULER] Daily reminders enabled.")
     else:
         logger.info("[SCHEDULER] Daily reminders disabled by configuration.")
+
+    if config["source_application_classifier_enabled"]:
+        scheduler.add_job(
+            lambda: run_async_job(source_application_classifier_job),
+            CronTrigger(
+                hour=config["source_application_classifier_hour"],
+                minute=config["source_application_classifier_minute"],
+                timezone=timezone,
+            ),
+            id=SOURCE_APPLICATION_CLASSIFIER_JOB_ID,
+            replace_existing=True,
+        )
+        logger.info("[SCHEDULER] Source application classifier enabled.")
+    else:
+        logger.info("[SCHEDULER] Source application classifier disabled by configuration.")
 
     logger.info("[SCHEDULER] Weekly reports disabled by configuration.")
 
