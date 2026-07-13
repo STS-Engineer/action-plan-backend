@@ -1,18 +1,24 @@
 import datetime
 
 from fastapi import HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import joinedload
 
 from app.models.action import Action
 from app.models.action_escalation_notification import ActionEscalationNotification
 from app.models.sujet import Sujet
 from app.services.action_event_log_service import log_action_event
+from app.services.action_status_logic_service import get_action_closed_state_predicate
 from app.services.auth_service import is_admin
 from app.services.organisation_hierarchy_service import normalize_email
 
 
 PENDING_STATUS = "pending"
 VALID_STATUS_TRANSITIONS = {"seen", "dismissed", "resolved"}
+
+
+def _normalized_recipient_column():
+    return func.lower(func.trim(func.coalesce(ActionEscalationNotification.recipient_email, "")))
 
 
 def _now_utc():
@@ -69,6 +75,38 @@ def serialize_escalation(notification: ActionEscalationNotification):
     }
 
 
+def _notification_rank_key(notification: ActionEscalationNotification):
+    return (
+        int(notification.escalation_level or 0),
+        notification.updated_at or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc),
+        notification.created_at or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc),
+        notification.id or 0,
+    )
+
+
+def _dedupe_current_work_queue_notifications(notifications):
+    current_by_key = {}
+    for notification in notifications:
+        key = (
+            notification.action_id,
+            normalize_email(notification.recipient_email),
+        )
+        existing = current_by_key.get(key)
+        if existing is None or _notification_rank_key(notification) > _notification_rank_key(existing):
+            current_by_key[key] = notification
+
+    return sorted(
+        current_by_key.values(),
+        key=lambda notification: (
+            int(notification.escalation_level or 0),
+            getattr(notification.action, "priority_index", None) or -1,
+            notification.created_at or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc),
+            notification.id or 0,
+        ),
+        reverse=True,
+    )
+
+
 def list_my_escalations_service(db, current_user, include_all: bool = False):
     user_email = normalize_email(getattr(current_user, "email", None))
     query = (
@@ -81,6 +119,7 @@ def list_my_escalations_service(db, current_user, include_all: bool = False):
         )
         .filter(ActionEscalationNotification.status == PENDING_STATUS)
         .filter(Action.is_deleted.is_(False))
+        .filter(~get_action_closed_state_predicate(Action))
     )
 
     if include_all:
@@ -89,15 +128,18 @@ def list_my_escalations_service(db, current_user, include_all: bool = False):
     else:
         query = query.filter(ActionEscalationNotification.recipient_email == user_email)
 
-    notifications = (
+    raw_notifications = (
         query
         .order_by(
             ActionEscalationNotification.escalation_level.desc(),
             Action.priority_index.desc().nullslast(),
+            ActionEscalationNotification.updated_at.desc(),
             ActionEscalationNotification.created_at.desc(),
+            ActionEscalationNotification.id.desc(),
         )
         .all()
     )
+    notifications = _dedupe_current_work_queue_notifications(raw_notifications)
 
     return {
         "count": len(notifications),
@@ -131,27 +173,47 @@ def update_escalation_status_service(db, notification_id: int, status: str, curr
 
     notification = get_visible_escalation(db, notification_id, current_user)
     now = _now_utc()
-    old_status = notification.status
-    notification.status = normalized_status
-    notification.updated_at = now
+    pending_group = [notification]
 
-    if normalized_status == "seen":
-        notification.seen_at = now
-    elif normalized_status == "resolved":
-        notification.resolved_at = now
+    if normalized_status in {"dismissed", "resolved"}:
+        pending_group = (
+            db.query(ActionEscalationNotification)
+            .filter(ActionEscalationNotification.action_id == notification.action_id)
+            .filter(_normalized_recipient_column() == normalize_email(notification.recipient_email))
+            .filter(ActionEscalationNotification.status == PENDING_STATUS)
+            .all()
+        )
 
-    log_action_event(
-        db=db,
-        action_id=notification.action_id,
-        event_type=f"action_escalation_{normalized_status}",
-        old_value=old_status,
-        new_value=normalized_status,
-        details=(
-            f"Escalation notification {notification.id} marked "
-            f"{normalized_status} by {getattr(current_user, 'email', None)}."
-        ),
-        created_by=getattr(current_user, "email", None),
-    )
+    for pending_notification in pending_group:
+        old_status = pending_notification.status
+        pending_notification.status = normalized_status
+        pending_notification.updated_at = now
+
+        if normalized_status == "seen":
+            pending_notification.seen_at = now
+        elif normalized_status == "resolved":
+            pending_notification.resolved_at = now
+
+        log_action_event(
+            db=db,
+            action_id=pending_notification.action_id,
+            event_type=f"action_escalation_{normalized_status}",
+            old_value=old_status,
+            new_value=normalized_status,
+            details=(
+                f"Escalation notification {pending_notification.id} marked "
+                f"{normalized_status} by {getattr(current_user, 'email', None)}."
+                if len(pending_group) == 1
+                else (
+                    f"Escalation notification {pending_notification.id} marked "
+                    f"{normalized_status} by {getattr(current_user, 'email', None)} "
+                    f"as part of current work-queue group transition for "
+                    f"action {notification.action_id} and recipient "
+                    f"{normalize_email(notification.recipient_email)}."
+                )
+            ),
+            created_by=getattr(current_user, "email", None),
+        )
     db.commit()
     db.refresh(notification)
 

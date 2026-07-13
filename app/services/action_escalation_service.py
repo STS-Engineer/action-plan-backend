@@ -12,6 +12,7 @@ from app.models.action_escalation_notification import ActionEscalationNotificati
 from app.services.action_event_log_service import log_action_event
 from app.services.action_status_logic_service import (
     get_action_active_predicate,
+    get_action_closed_state_predicate,
     normalize_action_status,
 )
 from app.services.email_service import send_email_with_diagnostics
@@ -27,6 +28,10 @@ logger = logging.getLogger(__name__)
 ESCALATION_EMAIL_EVENT_TYPE = "action_escalation_summary_email_sent"
 ESCALATION_HIERARCHY_ERROR_EVENT_TYPE = "action_escalation_hierarchy_error"
 PENDING_STATUS = "pending"
+
+
+def _normalized_recipient_column():
+    return func.lower(func.trim(func.coalesce(ActionEscalationNotification.recipient_email, "")))
 
 
 def _read_escalation_emails_enabled() -> bool:
@@ -152,13 +157,28 @@ def _build_summary_event_details(notification, recipient_email: str, pending_cou
     )
 
 
-def _get_existing_pending_notification(db, action_id: int, recipient_email: str, level: int):
+def _notification_rank_key(notification):
+    return (
+        int(notification.escalation_level or 0),
+        notification.updated_at or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc),
+        notification.created_at or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc),
+        notification.id or 0,
+    )
+
+
+def _get_existing_pending_notification(db, action_id: int, recipient_email: str):
+    normalized_recipient = normalize_email(recipient_email)
     return (
         db.query(ActionEscalationNotification)
         .filter(ActionEscalationNotification.action_id == action_id)
-        .filter(ActionEscalationNotification.recipient_email == recipient_email)
-        .filter(ActionEscalationNotification.escalation_level == level)
+        .filter(_normalized_recipient_column() == normalized_recipient)
         .filter(ActionEscalationNotification.status == PENDING_STATUS)
+        .order_by(
+            ActionEscalationNotification.escalation_level.desc(),
+            ActionEscalationNotification.updated_at.desc(),
+            ActionEscalationNotification.created_at.desc(),
+            ActionEscalationNotification.id.desc(),
+        )
         .first()
     )
 
@@ -173,7 +193,6 @@ def _upsert_pending_notification(db, action, resolution):
         db,
         action.id,
         recipient_email,
-        level,
     )
     created = notification is None
 
@@ -185,9 +204,78 @@ def _upsert_pending_notification(db, action, resolution):
             status=PENDING_STATUS,
         )
         db.add(notification)
+        db.flush()
+
+    previous_pending_notifications = (
+        db.query(ActionEscalationNotification)
+        .filter(ActionEscalationNotification.action_id == action.id)
+        .filter(ActionEscalationNotification.status == PENDING_STATUS)
+        .filter(_normalized_recipient_column() != recipient_email)
+        .all()
+    )
+    duplicate_same_recipient_notifications = (
+        db.query(ActionEscalationNotification)
+        .filter(ActionEscalationNotification.action_id == action.id)
+        .filter(ActionEscalationNotification.status == PENDING_STATUS)
+        .filter(_normalized_recipient_column() == recipient_email)
+        .filter(ActionEscalationNotification.id != notification.id)
+        .all()
+    )
+
+    for previous_notification in previous_pending_notifications:
+        old_status = previous_notification.status
+        previous_notification.status = "dismissed"
+        previous_notification.updated_at = _now_utc()
+        log_action_event(
+            db=db,
+            action_id=action.id,
+            event_type="action_escalation_recipient_changed",
+            old_value=old_status,
+            new_value="dismissed",
+            details=json.dumps(
+                {
+                    "reason": "hierarchy_recipient_changed",
+                    "previous_notification_id": previous_notification.id,
+                    "new_notification_id": notification.id,
+                    "previous_recipient_email": normalize_email(previous_notification.recipient_email),
+                    "new_recipient_email": recipient_email,
+                    "old_level": previous_notification.escalation_level,
+                    "new_level": level,
+                },
+                default=_json_safe,
+                ensure_ascii=False,
+            ),
+            created_by="system",
+        )
+
+    for duplicate_notification in duplicate_same_recipient_notifications:
+        old_status = duplicate_notification.status
+        duplicate_notification.status = "dismissed"
+        duplicate_notification.updated_at = _now_utc()
+        log_action_event(
+            db=db,
+            action_id=action.id,
+            event_type="action_escalation_duplicate_pending_dismissed",
+            old_value=old_status,
+            new_value="dismissed",
+            details=json.dumps(
+                {
+                    "reason": "same_action_recipient_current_notification_reused",
+                    "dismissed_notification_id": duplicate_notification.id,
+                    "current_notification_id": notification.id,
+                    "recipient_email": recipient_email,
+                    "old_level": duplicate_notification.escalation_level,
+                    "new_level": level,
+                },
+                default=_json_safe,
+                ensure_ascii=False,
+            ),
+            created_by="system",
+        )
 
     notification.cc_emails = resolution.get("cc_emails") or []
     notification.hierarchy_source_used = ORGANISATION_SOURCE
+    notification.escalation_level = level
     notification.responsible_chain = _compact_chain(resolution.get("responsible_chain"))
     notification.requester_chain = _compact_chain(resolution.get("requester_chain"))
     notification.updated_at = _now_utc()
@@ -229,12 +317,21 @@ def _group_pending_notifications(db):
         .join(Action, Action.id == ActionEscalationNotification.action_id)
         .filter(ActionEscalationNotification.status == PENDING_STATUS)
         .filter(get_action_active_predicate(Action))
+        .filter(~get_action_closed_state_predicate(Action))
         .order_by(ActionEscalationNotification.recipient_email.asc())
         .all()
     )
+    current_by_key = {}
     grouped = defaultdict(list)
 
     for notification in pending:
+        recipient_email = normalize_email(notification.recipient_email)
+        key = (notification.action_id, recipient_email)
+        existing = current_by_key.get(key)
+        if existing is None or _notification_rank_key(notification) > _notification_rank_key(existing):
+            current_by_key[key] = notification
+
+    for notification in current_by_key.values():
         grouped[normalize_email(notification.recipient_email)].append(notification)
 
     return grouped

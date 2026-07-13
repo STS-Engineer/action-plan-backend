@@ -444,11 +444,6 @@ def _chain_email_at(chain_result: dict[str, Any], index: int):
         email = normalize_email(entry.get("email"))
         return email if is_valid_email(email) else None
 
-    if chain and chain_result.get("stop_reason") in {"ceo_reached", "olivier_reached"}:
-        entry = chain[-1]
-        email = normalize_email(entry.get("email"))
-        return email if is_valid_email(email) else None
-
     return None
 
 
