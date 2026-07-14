@@ -1,6 +1,6 @@
 import datetime
 from app.config.database import Base
-from sqlalchemy import Column, BigInteger, ForeignKey, Integer, Text, DateTime, func
+from sqlalchemy import Boolean, Column, BigInteger, ForeignKey, Integer, Text, DateTime, func, text
 from sqlalchemy.orm import relationship
 
 
@@ -27,6 +27,9 @@ class Sujet(Base):
     )
     inserted_by = Column(Text, nullable=False)
     source_application = Column(Text, nullable=True)
+    is_deleted = Column(Boolean, nullable=False, default=False, server_default=text("false"))
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+    deleted_by = Column(Text, nullable=True)
 
     parent = relationship("Sujet", remote_side=[id], back_populates="children")
     children = relationship("Sujet", back_populates="parent")

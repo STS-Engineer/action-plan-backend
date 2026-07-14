@@ -1,5 +1,8 @@
+import datetime
+
 from app.models.sujet import Sujet
 from app.models.action import Action
+from fastapi import HTTPException
 from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.orm import Session, aliased
 
@@ -44,6 +47,12 @@ ZERO_HOME_SUMMARY = {
 }
 
 
+def get_sujet_active_predicate(sujet_like=Sujet):
+    is_deleted_col = getattr(sujet_like, "is_deleted")
+
+    return or_(is_deleted_col.is_(False), is_deleted_col.is_(None))
+
+
 def normalize_sujet_display_key(titre: str | None) -> str:
     return " ".join((titre or "").strip().lower().split())
 
@@ -74,7 +83,12 @@ def get_sujet_logical_group_ids(
     if sujet_id in visiting:
         return [sujet_id]
 
-    sujet = db.query(Sujet).filter(Sujet.id == sujet_id).first()
+    sujet = (
+        db.query(Sujet)
+        .filter(Sujet.id == sujet_id)
+        .filter(get_sujet_active_predicate(Sujet))
+        .first()
+    )
 
     if not sujet:
         return [sujet_id]
@@ -97,6 +111,7 @@ def get_sujet_logical_group_ids(
 
     logical_sujets = (
         query
+        .filter(get_sujet_active_predicate(Sujet))
         .filter(func.lower(func.trim(Sujet.titre)) == title_key)
         .order_by(Sujet.created_at.asc(), Sujet.id.asc())
         .all()
@@ -120,6 +135,7 @@ def get_sujet_logical_group_sujets(db: Session, sujet_id: int) -> list[Sujet]:
     sujets = (
         db.query(Sujet)
         .filter(Sujet.id.in_(group_ids))
+        .filter(get_sujet_active_predicate(Sujet))
         .order_by(Sujet.created_at.asc(), Sujet.id.asc())
         .all()
     )
@@ -139,6 +155,7 @@ def count_logical_child_sujet_groups(db: Session, parent_sujet_ids: list[int]) -
     children = (
         db.query(Sujet)
         .filter(Sujet.parent_sujet_id.in_(parent_sujet_ids))
+        .filter(get_sujet_active_predicate(Sujet))
         .all()
     )
     child_groups = {
@@ -189,6 +206,7 @@ def merge_serialized_sujets_by_display_key(db: Session, sujets: list[dict]) -> l
         primary_sujet = (
             db.query(Sujet)
             .filter(Sujet.id.in_(merged_ids))
+            .filter(get_sujet_active_predicate(Sujet))
             .order_by(Sujet.created_at.asc(), Sujet.id.asc())
             .first()
         )
@@ -261,6 +279,7 @@ def find_or_create_sujet_by_normalized_title(
 
     existing_sujet = (
         query
+        .filter(get_sujet_active_predicate(Sujet))
         .filter(func.lower(func.trim(Sujet.titre)) == title_key)
         .order_by(Sujet.created_at.asc(), Sujet.id.asc())
         .first()
@@ -305,6 +324,7 @@ def build_sujet_tree_cte():
             Sujet.id.label("sujet_id"),
         )
         .where(Sujet.parent_sujet_id.is_(None))
+        .where(get_sujet_active_predicate(Sujet))
         .cte(name="sujet_tree", recursive=True)
     )
 
@@ -316,6 +336,7 @@ def build_sujet_tree_cte():
             child_sujet.id,
         )
         .where(child_sujet.parent_sujet_id == sujet_tree.c.sujet_id)
+        .where(get_sujet_active_predicate(child_sujet))
     )
 
 
@@ -331,6 +352,7 @@ def build_child_sujet_tree_cte(parent_sujet_id: int | list[int]):
             Sujet.id.label("sujet_id"),
         )
         .where(Sujet.parent_sujet_id.in_(parent_sujet_ids))
+        .where(get_sujet_active_predicate(Sujet))
         .cte(name="child_sujet_tree", recursive=True)
     )
 
@@ -342,6 +364,7 @@ def build_child_sujet_tree_cte(parent_sujet_id: int | list[int]):
             child_sujet.id,
         )
         .where(child_sujet.parent_sujet_id == sujet_tree.c.sujet_id)
+        .where(get_sujet_active_predicate(child_sujet))
     )
 
 
@@ -531,6 +554,8 @@ def build_direct_child_count_subquery():
         )
         .select_from(Sujet)
         .outerjoin(child_sujet, Sujet.id == child_sujet.parent_sujet_id)
+        .where(get_sujet_active_predicate(Sujet))
+        .where(get_sujet_active_predicate(child_sujet))
         .group_by(Sujet.id)
         .subquery()
     )
@@ -644,6 +669,7 @@ async def getSujetsService(db: Session):
             ).label("overdue_actions"),
         )
         .outerjoin(Action, (Sujet.id == Action.sujet_id) & get_action_active_predicate(Action))
+        .filter(get_sujet_active_predicate(Sujet))
         .group_by(Sujet.id)
         .order_by(Sujet.created_at.desc())
         .all()
@@ -786,6 +812,7 @@ async def getSujetsRacineService(
         .outerjoin(root_stats, root_stats.c.root_id == Sujet.id)
         .outerjoin(direct_child_counts, direct_child_counts.c.root_id == Sujet.id)
         .filter(Sujet.parent_sujet_id.is_(None))
+        .filter(get_sujet_active_predicate(Sujet))
         .filter(Sujet.id.in_(matching_root_ids_query))
         .order_by(Sujet.created_at.desc())
         .all()
@@ -832,6 +859,7 @@ async def get_sous_sujets_by_sujet_id_service(
         sous_sujets = (
             db.query(Sujet)
             .filter(Sujet.parent_sujet_id.in_(parent_sujet_ids))
+            .filter(get_sujet_active_predicate(Sujet))
             .order_by(Sujet.created_at.desc())
             .all()
         )
@@ -888,6 +916,7 @@ async def get_sous_sujets_by_sujet_id_service(
         .outerjoin(root_stats, root_stats.c.root_id == Sujet.id)
         .outerjoin(direct_child_counts, direct_child_counts.c.root_id == Sujet.id)
         .filter(Sujet.parent_sujet_id.in_(parent_sujet_ids))
+        .filter(get_sujet_active_predicate(Sujet))
         .filter(Sujet.id.in_(matching_root_ids_query))
         .order_by(Sujet.created_at.desc())
         .all()
@@ -960,6 +989,7 @@ async def get_team_sujets_racine_service(
         .outerjoin(root_stats, root_stats.c.root_id == Sujet.id)
         .outerjoin(direct_child_counts, direct_child_counts.c.root_id == Sujet.id)
         .filter(Sujet.parent_sujet_id.is_(None))
+        .filter(get_sujet_active_predicate(Sujet))
         .filter(Sujet.id.in_(matching_root_ids_query))
         .order_by(Sujet.created_at.desc())
         .all()
@@ -987,3 +1017,75 @@ async def get_team_sujets_racine_service(
     ]
 
     return merge_serialized_sujets_by_display_key(db, serialized_sujets)
+
+
+async def delete_sujet_service(
+    sujet_id: int,
+    db: Session,
+    current_user,
+):
+    sujet = (
+        db.query(Sujet)
+        .filter(Sujet.id == sujet_id)
+        .filter(get_sujet_active_predicate(Sujet))
+        .first()
+    )
+
+    if not sujet:
+        raise HTTPException(status_code=404, detail="Sujet not found")
+
+    sujet_ids = get_sujet_logical_group_ids(db, sujet_id)
+
+    active_actions_count = (
+        db.query(func.count(Action.id))
+        .filter(Action.sujet_id.in_(sujet_ids))
+        .filter(get_action_active_predicate(Action))
+        .scalar()
+        or 0
+    )
+
+    if active_actions_count > 0:
+        raise HTTPException(
+            status_code=409,
+            detail="This topic cannot be deleted because it contains active actions.",
+        )
+
+    active_child_sujets_count = (
+        db.query(func.count(Sujet.id))
+        .filter(Sujet.parent_sujet_id.in_(sujet_ids))
+        .filter(get_sujet_active_predicate(Sujet))
+        .scalar()
+        or 0
+    )
+
+    if active_child_sujets_count > 0:
+        raise HTTPException(
+            status_code=409,
+            detail="This topic cannot be deleted because it contains child topics or subtopics.",
+        )
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    deleted_by = normalize_scope_email(getattr(current_user, "email", None))
+
+    sujets = (
+        db.query(Sujet)
+        .filter(Sujet.id.in_(sujet_ids))
+        .filter(get_sujet_active_predicate(Sujet))
+        .all()
+    )
+
+    for item in sujets:
+        item.is_deleted = True
+        item.deleted_at = now
+        item.deleted_by = deleted_by
+        item.updated_at = now
+
+    db.commit()
+
+    return {
+        "deleted": True,
+        "sujet_id": sujet_id,
+        "deleted_sujet_ids": [item.id for item in sujets],
+        "count": len(sujets),
+        "message": "Topic deleted.",
+    }

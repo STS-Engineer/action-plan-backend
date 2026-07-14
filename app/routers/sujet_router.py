@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from app.config.database import get_db
 from app.models.user import User
 from app.services.sujet_service import (
+    delete_sujet_service,
     getSujetsService,
     getSujetsRacineService,
     get_home_summary_service,
@@ -135,6 +136,21 @@ async def getSousSujetsBySujetId(
         user_role=normalize_user_role(current_user.role),
         organisation_db=organisation_db,
     )
+
+
+@router.delete("/sujets/{sujet_id}")
+async def deleteSujet(
+    sujet_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return await delete_sujet_service(
+        sujet_id=sujet_id,
+        db=db,
+        current_user=current_user,
+    )
+
+
 @router.get("/team-sujets-racine")
 async def getTeamSujetsRacine(
     email: str,

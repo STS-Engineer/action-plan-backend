@@ -33,7 +33,6 @@ from app.services.sujet_service import get_sujet_logical_group_ids
 from app.services.team_scope_service import get_direct_report_emails_for_team_scope
 
 
-ACTION_DELETE_FORBIDDEN_MESSAGE = "You can only delete actions you own or manage."
 TEAM_ACTIONS_MAX_DEPTH = 2
 SUPPORTED_ACTION_SCOPES = {"my", "team", "requested_by_me", "all"}
 
@@ -1014,16 +1013,6 @@ async def delete_action_service(
 
     if not action:
         raise HTTPException(status_code=404, detail="Action not found")
-
-    access = can_access_action(
-        logged_email,
-        action,
-        directory_db,
-        user_role=getattr(current_user, "role", None),
-    )
-
-    if not access["allowed"]:
-        raise HTTPException(status_code=403, detail=ACTION_DELETE_FORBIDDEN_MESSAGE)
 
     subtree_ids = _collect_active_action_subtree_ids(action.id, db)
     now = datetime.datetime.now(datetime.timezone.utc)
